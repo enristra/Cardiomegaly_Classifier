@@ -184,7 +184,7 @@ print("Usando crop semplice (70% centrale)")
 
 train_dataset = DataClass(split='train',
     transform=data_transform, 
-    download=False,
+    download=True,
     root='/scratch.hpc/enrico.strangio/Cardiomegaly_Classifier/data')
 test_dataset = DataClass(split='test',
     transform=data_transform,
