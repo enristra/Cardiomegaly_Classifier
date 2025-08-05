@@ -1,46 +1,45 @@
-# 🫀 Cardiomegaly Classifier – CHESTMNIST + CUDA
+# 🫀 Cardiomegaly Classifier | Exploring CUDA for Medical Imaging
 
-Un semplice classificatore per la rilevazione della **cardiomegalia** da radiografie toraciche, sviluppato per l’esame di *Sistemi Digitali* presso l’Università di Bologna.
+A simple classifier for detecting cardiomegaly from chest X-rays, developed as part of the Digital Systems course at the University of Bologna.
 
-Il progetto si concentra sull’**ottimizzazione della fase di inferenza** tramite **CUDA**, utilizzando un modello interpretabile e lineare, senza reti neurali complesse.
-
+The main goal is to optimize inference using CUDA, applying parallel programming concepts to a basic, interpretable model instead of complex deep neural networks.
 ---
 
-## 🎯 Obiettivi
+## 🎯 Objectives
+Classify grayscale images (224×224) from CHESTMNIST dataset.
 
-- Classificare immagini 224×224 in scala di grigi (CHESTMNIST).
-- Confrontare le prestazioni tra una versione sequenziale in C++ e una versione parallela in CUDA.
-- Apprendere concetti fondamentali di:
-  - programmazione GPU,
-  - gestione della memoria e dei thread,
-  - parallelizzazione di algoritmi numerici.
+Compare performance between a sequential C++ implementation and a parallel CUDA version.
 
+Learn and apply key concepts in:
+✅ GPU programming
+✅ Memory and thread management
+✅ Parallelization of numerical algorithms
 ---
 
-## 🧠 Metodo
+## 🧠 Methodology
+The algorithm is based on a weighted sum of pixels, with weights learned from a simple linear model trained in PyTorch.
 
-L’algoritmo si basa su una **somma pesata dei pixel**, con i pesi appresi da un **modello lineare addestrato in PyTorch**.  
-L'inferenza consiste in un semplice prodotto scalare `pixel × peso`, seguito da un confronto con soglia per la classificazione binaria (presenza o assenza di cardiomegalia).
-
+Inference consists of a dot product (pixel × weight) followed by a threshold-based decision for binary classification (presence or absence of cardiomegaly).
 ---
 
-## 📊 Risultati previsti
+## 📊 Expected Results
+Speedup measurement: GPU vs CPU during inference.
 
-- Misura dello **speedup GPU vs CPU** nella fase di inferenza.
-- Valutazione della **soglia decisionale ottimale** basata su accuratezza, sensibilità e precisione.
-- Analisi dei colli di bottiglia computazionali e delle potenzialità di parallelizzazione.
+Optimal threshold selection based on accuracy, sensitivity, and precision.
+
+Performance analysis: bottlenecks and opportunities for further optimization (shared memory, grid/block configuration).
 
 ---
 
 ## 📚 Dataset
 
-- Dataset utilizzato: [CHESTMNIST – MedMNIST v2](https://medmnist.com/)
-- Immagini in scala di grigi, 224×224 pixel.
-- Classe target: **Cardiomegaly** (indice 5 su 14 etichette multilabel).
+- Dataset: [CHESTMNIST – MedMNIST v2](https://medmnist.com/)
+- Grayscale images, 224×224 pixel.
+- Target class: **Cardiomegaly** (indice 5 su 14 etichette multilabel).
 
 ---
 
-## 👨‍💻 Autore
+## 👨‍💻 Author
 
 **Enrico Strangio**  
 Computer Engineering MSc @Unibo  
@@ -48,7 +47,8 @@ Computer Engineering MSc @Unibo
 
 ---
 
-## 🧭 Stato del progetto
+## 🧭 Project Status
 
-🚧 In fase di sviluppo – documentazione e ottimizzazioni CUDA in corso.  
-Condiviso pubblicamente a scopo didattico e di apprendimento.
+🚧 Work in Progress
+CUDA optimizations and documentation are ongoing.
+Shared for educational purposes only.
