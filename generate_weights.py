@@ -188,7 +188,7 @@ train_dataset = DataClass(split='train',
     root='/scratch.hpc/enrico.strangio/Cardiomegaly_Classifier/data')
 test_dataset = DataClass(split='test',
     transform=data_transform,
-      download=False)
+      download=True)
 
 train_loader = DataLoader(dataset=train_dataset, batch_size=64, shuffle=True)
 test_loader = DataLoader(dataset=test_dataset, batch_size=64, shuffle=False)
