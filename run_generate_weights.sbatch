@@ -10,7 +10,7 @@
 #SBATCH --chdir=/scratch.hpc/enrico.strangio/Cardiomegaly_Classifier/
 
 # Attiva ambiente virtuale
-source ~/venv/bin/activate
+
 
 # (Facoltativo) installa jupyter se non già presente
 # pip install --no-cache-dir jupyter
