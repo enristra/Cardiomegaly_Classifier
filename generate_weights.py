@@ -212,7 +212,7 @@ def visualize_crop_effect(dataset, num_samples=4):
     original_transform = transforms.Compose([
         transforms.ToTensor(),
     ])
-    original_dataset = DataClass(split='train', transform=original_transform, download=False)
+    original_dataset = DataClass(split='train', transform=original_transform, download=True, root='/scratch.hpc/enrico.strangio/Cardiomegaly_Classifier/data')
 
     for i in range(num_samples):
         # Immagine originale
