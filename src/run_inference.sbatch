@@ -8,6 +8,8 @@
 #SBATCH --mem=8G
 #SBATCH --time=00:10:00
 
+source /etc/profile.d/modules.sh
+
 echo "Job started on $(hostname)"
 echo "CUDA Version:"
 nvcc --version
@@ -19,7 +21,7 @@ module load gcc/11.2
 cd /scratch.hpc/enrico.strangio/Cardiomegaly_Classifier
 
 # Compila il file CUDA
-nvcc -O2 cardiomegaly_cuda.cu -o cardiomegaly_cuda -lcnpy -lz
+nvcc -O2 src/cardiomegaly_cuda.cu -o cardiomegaly_cuda -lcnpy -lz
 
 # Mostra info GPU
 echo "GPU Info before execution:"
