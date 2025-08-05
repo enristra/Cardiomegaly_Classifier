@@ -182,8 +182,13 @@ print("Usando crop semplice (70% centrale)")
 
 # --- 4. Caricamento Dataset con Crop Intelligente ---
 
-train_dataset = DataClass(split='train', transform=data_transform, download=download)
-test_dataset = DataClass(split='test', transform=data_transform, download=download)
+train_dataset = DataClass(split='train',
+    transform=data_transform, 
+    download=False,
+    root='/scratch.hpc/enrico.strangio/Cardiomegaly_Classifier/data')
+test_dataset = DataClass(split='test',
+    transform=data_transform,
+      download=False)
 
 train_loader = DataLoader(dataset=train_dataset, batch_size=64, shuffle=True)
 test_loader = DataLoader(dataset=test_dataset, batch_size=64, shuffle=False)
