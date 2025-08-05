@@ -1,54 +1,62 @@
 # 🫀 Cardiomegaly Classifier | Exploring CUDA for Medical Imaging
 
-A simple classifier for detecting cardiomegaly from chest X-rays, developed as part of the Digital Systems course at the University of Bologna.
+A simple, **educational project** developed during my Master's in Computer Engineering at the University of Bologna.  
+The goal: explore **GPU programming with CUDA** by optimizing inference for a basic, interpretable classifier applied to chest X-ray images (CHESTMNIST dataset).
 
-The main goal is to optimize inference using CUDA, applying parallel programming concepts to a basic, interpretable model instead of complex deep neural networks.
+---
+
+## 📌 About this project
+This work is **purely didactic**: it does not aim to provide a real clinical solution, but to experiment with:
+- Applying **AI concepts** to medical imaging.
+- Implementing a **sequential version (C++)** and a **parallel version (CUDA)**.
+- Understanding **GPU memory management, thread configuration, and performance bottlenecks**.
+
 ---
 
 ## 🎯 Objectives
-Classify grayscale images (224×224) from CHESTMNIST dataset.
+- Classify grayscale images (224×224) from CHESTMNIST.
+- Compare **CPU vs GPU** performance during inference.
+- Learn fundamentals of:
+  ✅ GPU programming  
+  ✅ Shared vs global memory  
+  ✅ Reduction and parallelization patterns  
 
-Compare performance between a sequential C++ implementation and a parallel CUDA version.
-
-Learn and apply key concepts in:
-✅ GPU programming
-✅ Memory and thread management
-✅ Parallelization of numerical algorithms
 ---
 
 ## 🧠 Methodology
-The algorithm is based on a weighted sum of pixels, with weights learned from a simple linear model trained in PyTorch.
+- **Classifier logic**: weighted sum of pixels, weights obtained from a simple linear model trained in PyTorch.
+- **Inference process**:
+  - Dot product (pixel × weight)
+  - Threshold-based binary classification (cardiomegaly: yes/no)
 
-Inference consists of a dot product (pixel × weight) followed by a threshold-based decision for binary classification (presence or absence of cardiomegaly).
 ---
 
 ## 📊 Expected Results
-Speedup measurement: GPU vs CPU during inference.
-
-Optimal threshold selection based on accuracy, sensitivity, and precision.
-
-Performance analysis: bottlenecks and opportunities for further optimization (shared memory, grid/block configuration).
+- **Speedup** analysis: CUDA vs sequential C++.
+- **Performance tuning**: memory optimizations, grid/block configuration.
+- **Diagnostic metrics**: accuracy, sensitivity, specificity, precision.
 
 ---
 
 ## 📚 Dataset
-
-- Dataset: [CHESTMNIST – MedMNIST v2](https://medmnist.com/)
-- Grayscale images, 224×224 pixel.
-- Target class: **Cardiomegaly** (indice 5 su 14 etichette multilabel).
+- [CHESTMNIST – MedMNIST v2](https://medmnist.com/)
+- Grayscale images, size **224×224 px**
+- Target class: Cardiomegaly (index 5 in multilabel setting)
 
 ---
 
 ## 👨‍💻 Author
-
 **Enrico Strangio**  
-Computer Engineering MSc @Unibo  
-[LinkedIn](https://www.linkedin.com/in/enrico-strangio/) – [GitHub](https://github.com/enristra)
+MSc in Computer Engineering @ University of Bologna  
+🔗 [LinkedIn](https://www.linkedin.com/in/enricostrangio) | [GitHub](https://github.com/enristra)
 
 ---
 
-## 🧭 Project Status
+## 🧭 Status
+🚧 Work in Progress – CUDA optimization and documentation ongoing  
+🔍 Shared for **educational purposes only**
 
-🚧 Work in Progress
-CUDA optimizations and documentation are ongoing.
-Shared for educational purposes only.
+---
+
+## 🔗 Related Links
+- Project showcase on LinkedIn: *coming soon*
