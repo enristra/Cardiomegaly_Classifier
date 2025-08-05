@@ -386,14 +386,14 @@ plt.xlabel('Pixel X')
 plt.ylabel('Pixel Y')
 
 # Salva l'immagine
-output_dir = '../data/images'  # o la cartella che preferisci
+output_dir = '/scratch.hpc/enrico.strangio/Cardiomegaly_Classifier/data/images'  # o la cartella che preferisci
 os.makedirs(output_dir, exist_ok=True)
 plt.savefig(os.path.join(output_dir, 'pesi_con_crop.png'), dpi=300, bbox_inches='tight')
 plt.show()
 
 print(f"Immagine salvata in: {os.path.join(output_dir, 'pesi_con_crop.png')}")
 # Percorso dove salvare i pesi addestrati
-output_weights_dir = '../data/weights' # Utilizza il percorso relativo che avevi
+output_weights_dir = '/scratch.hpc/enrico.strangio/Cardiomegaly_Classifier/data/weights'
 os.makedirs(output_weights_dir, exist_ok=True)
 weights_output_filepath = os.path.join(output_weights_dir, 'cardiomegaly_weights_224x224_trained_CROP.npy')
 
@@ -433,5 +433,5 @@ def compare_weights_distribution(weights_original_path=None):
     plt.show()
 
 # Confronta se hai i pesi originali
-compare_weights_distribution('../data/weights/cardiomegaly_weights_224x224_trained.npy')
+compare_weights_distribution('/scratch.hpc/enrico.strangio/Cardiomegaly_Classifier/data/weights/cardiomegaly_weights_224x224_trained.npy')
 
