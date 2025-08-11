@@ -92,19 +92,54 @@ static void save_scores_npy(const std::string& path, const std::vector<float>& s
 static std::vector<float> load_images_batch_or_dir(const std::string& batch_path,
                                                    const std::string& images_dir,
                                                    size_t& N_out) {
+    // 1) Tenta BATCH se esiste
     if (!batch_path.empty() && fs::exists(batch_path)) {
-        std::cout << "Carico batch immagini: " << batch_path << std::endl;
+        std::cout << "[IMG] Provo batch: " << batch_path << std::endl << std::flush;
         cnpy::NpyArray arr = cnpy::npy_load(batch_path);
-        if (arr.shape.size() != 2 || arr.shape[1] != P)
-            throw std::runtime_error("images_batch.npy deve essere N x 50176 float32");
-        if (arr.word_size != sizeof(float))
-            throw std::runtime_error("images_batch.npy deve essere float32");
-        N_out = arr.shape[0];
-        const float* p = arr.data<float>();
-        return std::vector<float>(p, p + N_out*P);
+        std::cout << "[IMG] Batch caricato. dims=" << arr.shape.size() << " [";
+        for (size_t i=0;i<arr.shape.size();++i){ std::cout << arr.shape[i] << (i+1<arr.shape.size()?'x':']'); }
+        std::cout << "] word_size=" << arr.word_size << std::endl << std::flush;
+
+        // Supporta sia (N, P) che (N, 224, 224)
+        if (arr.shape.size() == 2 && arr.shape[1] == P) {
+            if (arr.word_size != sizeof(float))
+                throw std::runtime_error("images_batch.npy (N x 50176) deve essere float32");
+            N_out = arr.shape[0];
+            const float* p = arr.data<float>();
+            return std::vector<float>(p, p + N_out*P);
+        } else if (arr.shape.size() == 3 && arr.shape[1] == H && arr.shape[2] == W) {
+            // Converte (N,224,224) -> (N, P)
+            N_out = arr.shape[0];
+            std::vector<float> out; out.reserve(N_out*P);
+            if (arr.word_size == sizeof(uint8_t)) {
+                const uint8_t* p = arr.data<uint8_t>();
+                for (size_t n=0;n<N_out;++n) {
+                    const uint8_t* img = p + n*P;
+                    for (int i=0;i<P;++i) out.push_back(img[i] / 255.0f);
+                }
+            } else if (arr.word_size == sizeof(float)) {
+                const float* p = arr.data<float>();
+                for (size_t n=0;n<N_out;++n) {
+                    const float* img = p + n*P;
+                    out.insert(out.end(), img, img + P);
+                }
+            } else {
+                throw std::runtime_error("images_batch.npy (N,224,224) deve essere uint8 o float32");
+            }
+            std::cout << "[IMG] Batch convertito a (N,P). N=" << N_out << std::endl << std::flush;
+            return out;
+        } else {
+            throw std::runtime_error("images_batch.npy shape inattesa (supporto: (N,50176) o (N,224,224))");
+        }
     }
 
-    // fallback: directory
+    // 2) Fallback: DIRECTORY
+    std::cout << "[IMG] Batch non trovato (" << batch_path << "), provo directory: " 
+              << images_dir << std::endl << std::flush;
+    if (!fs::exists(images_dir)) {
+        throw std::runtime_error("Directory immagini non esiste: " + images_dir);
+    }
+
     std::vector<fs::path> files;
     for (const auto& e : fs::directory_iterator(images_dir)) {
         if (e.path().extension() == ".npy" &&
@@ -112,19 +147,24 @@ static std::vector<float> load_images_batch_or_dir(const std::string& batch_path
             files.push_back(e.path());
         }
     }
-    if (files.empty()) throw std::runtime_error("Nessuna immagine trovata in " + images_dir);
     std::sort(files.begin(), files.end());
+    if (files.empty()) throw std::runtime_error("Nessuna npy trovata in " + images_dir);
+
+    std::cout << "[IMG] Trovati " << files.size() << " file .npy nella dir." << std::endl << std::flush;
 
     std::vector<float> all;
     all.reserve(files.size()*P);
 
+    size_t cnt=0;
     for (auto& f : files) {
+        if ((++cnt % 500) == 0) {
+            std::cout << "[IMG] Caricate " << cnt << " immagini..." << std::endl << std::flush;
+        }
         cnpy::NpyArray a = cnpy::npy_load(f.string());
-        // supporta (224,224) uint8/float o array flatten P
         if (a.shape.size() == 2 && a.shape[0]==H && a.shape[1]==W) {
             if (a.word_size == sizeof(uint8_t)) {
                 const uint8_t* p = a.data<uint8_t>();
-                for (int i=0;i<P;++i) all.push_back(p[i] / 255.0f); // [0,1]
+                for (int i=0;i<P;++i) all.push_back(p[i] / 255.0f);
             } else if (a.word_size == sizeof(float)) {
                 const float* p = a.data<float>();
                 all.insert(all.end(), p, p+P);
@@ -137,13 +177,14 @@ static std::vector<float> load_images_batch_or_dir(const std::string& batch_path
             const float* p = a.data<float>();
             all.insert(all.end(), p, p+P);
         } else {
-            throw std::runtime_error("Dimensione immagine inattesa in " + f.string());
+            throw std::runtime_error("Dimensione inattesa in " + f.string());
         }
     }
     N_out = files.size();
-    std::cout << "Caricate " << N_out << " immagini da directory.\n";
+    std::cout << "[IMG] Caricate " << N_out << " immagini totali." << std::endl << std::flush;
     return all;
 }
+
 
 // (opzionale) sequenziale CPU per confronto tempi/correttezza
 static std::vector<float> cpu_dot_scores(const std::vector<float>& imgs,
