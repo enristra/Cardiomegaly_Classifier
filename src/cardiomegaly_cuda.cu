@@ -2,263 +2,297 @@
 #include <iostream>
 #include <vector>
 #include <string>
-#include <filesystem>
-#include <algorithm>
-#include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
+#include <algorithm>
+#include <chrono>
+#include <dirent.h>   // opendir/readdir/closedir
+#include <sys/stat.h> // stat
 #include "cnpy.h"
 
-namespace fs = std::filesystem;
+using namespace std;
 
 #define CHECK_CUDA(call) do { \
     cudaError_t err = (call);  \
     if (err != cudaSuccess) {  \
-        std::cerr << "CUDA error " << cudaGetErrorString(err) \
-                  << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+        cerr << "CUDA error " << cudaGetErrorString(err) \
+             << " at " << __FILE__ << ":" << __LINE__ << endl; \
         std::exit(1); \
     } \
 } while(0)
 
-static constexpr int H = 224;
-static constexpr int W = 224;
-static constexpr int P = H*W; // 50176
+static const int H = 224;
+static const int W = 224;
+static const int P = H * W; // 50176
 
-// Kernel: un blocco per immagine, riduzione in shared memory
+// --------------------------------- UTILS ---------------------------------
+
+static bool file_exists(const string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+static bool dir_exists(const string& path) {
+    struct stat st;
+    return (stat(path.c_str(), &st) == 0) && S_ISDIR(st.st_mode);
+}
+
+static bool starts_with(const string& s, const char* prefix) {
+    size_t lp = strlen(prefix);
+    return s.size() >= lp && strncmp(s.c_str(), prefix, lp) == 0;
+}
+
+static bool ends_with(const string& s, const char* suffix) {
+    size_t ls = s.size(), l = strlen(suffix);
+    return (ls >= l) && (s.compare(ls - l, l, suffix) == 0);
+}
+
+// ------------------------------- CUDA KERNEL ------------------------------
+
 __global__ void dot_per_image_kernel(const float* __restrict__ images,
                                      const float* __restrict__ weights,
                                      float* __restrict__ scores,
                                      int pixels_per_img) {
-    extern __shared__ float sdata[]; // dimensione = blockDim.x
-    const int tid = threadIdx.x;
-    const int img_idx = blockIdx.x;
-
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int img_idx = blockIdx.x;
     const float* img = images + img_idx * pixels_per_img;
 
     float sum = 0.0f;
-    // ogni thread attraversa i pixel a stride
     for (int i = tid; i < pixels_per_img; i += blockDim.x) {
-        // letture coalesced su img; weights è uguale per tutti
         sum += img[i] * weights[i];
     }
 
     sdata[tid] = sum;
     __syncthreads();
 
-    // riduzione in shared
-    for (int s = blockDim.x/2; s > 0; s >>= 1) {
+    for (int s = (blockDim.x >> 1); s > 0; s >>= 1) {
         if (tid < s) sdata[tid] += sdata[tid + s];
         __syncthreads();
     }
-
-    if (tid == 0) {
-        scores[img_idx] = sdata[0];
-    }
+    if (tid == 0) scores[img_idx] = sdata[0];
 }
 
-// -------- Utils I/O --------
-static std::vector<float> load_weights_or_die(const std::string& path) {
-    std::cout << "Carico pesi: " << path << std::endl;
-    cnpy::NpyArray arr = cnpy::npy_load(path);
-    std::cout << "Pesi caricati. Shape: " << arr.shape[0] << "x" << arr.shape[1] << std::endl;
+// ------------------------------- I/O HELPERS -----------------------------
 
-    if (arr.shape.size() != 2 || arr.shape[0] != H || arr.shape[1] != W)
-        throw std::runtime_error("weights.npy deve essere 224x224");
-    std::vector<float> w;
-    if (arr.word_size == sizeof(float)) {
-        float* p = arr.data<float>();
-        w.assign(p, p + arr.num_vals);
-    } else if (arr.word_size == sizeof(double)) {
-        double* p = arr.data<double>();
-        w.resize(arr.num_vals);
-        for (size_t i=0;i<arr.num_vals;++i) w[i] = static_cast<float>(p[i]);
-    } else {
-        throw std::runtime_error("Tipo pesi non supportato");
+static vector<float> load_weights_or_die(const string& path) {
+    cout << "[W] Carico pesi: " << path << endl;
+    cnpy::NpyArray arr = cnpy::npy_load(path);
+
+    if (arr.shape.size() != 2 || arr.shape[0] != (size_t)H || arr.shape[1] != (size_t)W) {
+        throw runtime_error("weights.npy deve avere shape 224x224");
     }
-    // (opzionale) normalizza a somma 1 per avere media pesata
-    double s=0.0; for (float v: w) s += v;
-    if (s > 0) for (auto& v: w) v = static_cast<float>(v / s);
+
+    vector<float> w(P);
+    if (arr.word_size == sizeof(float)) {
+        const float* p = arr.data<float>();
+        copy(p, p + P, w.begin());
+    } else if (arr.word_size == sizeof(double)) {
+        const double* p = arr.data<double>();
+        for (int i = 0; i < P; ++i) w[i] = (float)p[i];
+    } else {
+        throw runtime_error("Tipo pesi non supportato (attesi float32 o float64)");
+    }
+
+    // opzionale: normalizzazione somma=1
+    double s = 0.0;
+    for (int i = 0; i < P; ++i) s += w[i];
+    if (s != 0.0) {
+        for (int i = 0; i < P; ++i) w[i] = (float)(w[i] / s);
+    }
+
+    cout << "[W] OK (" << H << "x" << W << ")\n";
     return w;
 }
 
-static void save_scores_npy(const std::string& path, const std::vector<float>& scores) {
-    std::vector<size_t> shape = { scores.size() };
+static void save_scores_npy(const string& path, const vector<float>& scores) {
+    vector<size_t> shape(1);
+    shape[0] = (size_t)scores.size();
     cnpy::npy_save(path, scores.data(), shape, "w");
-    std::cout << "Salvato: " << path << std::endl;
+    cout << "[OUT] Salvato " << path << " (" << scores.size() << " elementi)\n";
 }
 
-// Carica batch N×P (float32) se esiste, altrimenti legge directory con image_*.npy (uint8 o float)
-static std::vector<float> load_images_batch_or_dir(const std::string& batch_path,
-                                                   const std::string& images_dir,
-                                                   size_t& N_out) {
-    // 1) Tenta BATCH se esiste
-    if (!batch_path.empty() && fs::exists(batch_path)) {
-        std::cout << "[IMG] Provo batch: " << batch_path << std::endl << std::flush;
+// Carica batch (N,50176 float32) o (N,224,224 uint8/float32), altrimenti directory image_*.npy
+// max_images > 0 limita il numero di immagini
+static vector<float> load_images_batch_or_dir(const string& batch_path,
+                                              const string& images_dir,
+                                              int max_images,
+                                              int& N_out) {
+    // 1) batch file
+    if (!batch_path.empty() && file_exists(batch_path)) {
+        cout << "[IMG] Provo batch: " << batch_path << endl;
         cnpy::NpyArray arr = cnpy::npy_load(batch_path);
-        std::cout << "[IMG] Batch caricato. dims=" << arr.shape.size() << " [";
-        for (size_t i=0;i<arr.shape.size();++i){ std::cout << arr.shape[i] << (i+1<arr.shape.size()?'x':']'); }
-        std::cout << "] word_size=" << arr.word_size << std::endl << std::flush;
 
-        // Supporta sia (N, P) che (N, 224, 224)
-        if (arr.shape.size() == 2 && arr.shape[1] == P) {
-            if (arr.word_size != sizeof(float))
-                throw std::runtime_error("images_batch.npy (N x 50176) deve essere float32");
-            N_out = arr.shape[0];
+        if (arr.shape.size() == 2 && arr.shape[1] == (size_t)P) {
+            if (arr.word_size != sizeof(float)) throw runtime_error("Batch (N x 50176) deve essere float32");
+            int N_all = (int)arr.shape[0];
+            int N_lim = (max_images > 0 && max_images < N_all) ? max_images : N_all;
             const float* p = arr.data<float>();
-            return std::vector<float>(p, p + N_out*P);
-        } else if (arr.shape.size() == 3 && arr.shape[1] == H && arr.shape[2] == W) {
-            // Converte (N,224,224) -> (N, P)
-            N_out = arr.shape[0];
-            std::vector<float> out; out.reserve(N_out*P);
+            N_out = N_lim;
+
+            vector<float> out(N_out * P);
+            copy(p, p + (size_t)N_out * P, out.begin());
+            cout << "[IMG] Batch (N,P). Uso N=" << N_out << "\n";
+            return out;
+        }
+        if (arr.shape.size() == 3 && arr.shape[1] == (size_t)H && arr.shape[2] == (size_t)W) {
+            int N_all = (int)arr.shape[0];
+            int N_lim = (max_images > 0 && max_images < N_all) ? max_images : N_all;
+            N_out = N_lim;
+
+            vector<float> out(N_out * P);
             if (arr.word_size == sizeof(uint8_t)) {
                 const uint8_t* p = arr.data<uint8_t>();
-                for (size_t n=0;n<N_out;++n) {
-                    const uint8_t* img = p + n*P;
-                    for (int i=0;i<P;++i) out.push_back(img[i] / 255.0f);
+                for (int n = 0; n < N_out; ++n) {
+                    const uint8_t* img = p + (size_t)n * P;
+                    float* dst = out.data() + (size_t)n * P;
+                    for (int i = 0; i < P; ++i) dst[i] = img[i] / 255.0f;
                 }
             } else if (arr.word_size == sizeof(float)) {
                 const float* p = arr.data<float>();
-                for (size_t n=0;n<N_out;++n) {
-                    const float* img = p + n*P;
-                    out.insert(out.end(), img, img + P);
+                for (int n = 0; n < N_out; ++n) {
+                    const float* img = p + (size_t)n * P;
+                    float* dst = out.data() + (size_t)n * P;
+                    copy(img, img + P, dst);
                 }
             } else {
-                throw std::runtime_error("images_batch.npy (N,224,224) deve essere uint8 o float32");
+                throw runtime_error("Batch (N,224,224) deve essere uint8 o float32");
             }
-            std::cout << "[IMG] Batch convertito a (N,P). N=" << N_out << std::endl << std::flush;
+            cout << "[IMG] Batch (N,224,224). Uso N=" << N_out << "\n";
             return out;
-        } else {
-            throw std::runtime_error("images_batch.npy shape inattesa (supporto: (N,50176) o (N,224,224))");
         }
+
+        throw runtime_error("Batch shape inattesa. Attesi (N,50176) o (N,224,224).");
     }
 
-    // 2) Fallback: DIRECTORY
-    std::cout << "[IMG] Batch non trovato (" << batch_path << "), provo directory: " 
-              << images_dir << std::endl << std::flush;
-    if (!fs::exists(images_dir)) {
-        throw std::runtime_error("Directory immagini non esiste: " + images_dir);
-    }
+    // 2) directory
+    cout << "[IMG] Batch non trovato. Provo directory: " << images_dir << endl;
+    if (!dir_exists(images_dir)) throw runtime_error("Directory immagini non esiste: " + images_dir);
 
-    std::vector<fs::path> files;
-    for (const auto& e : fs::directory_iterator(images_dir)) {
-        if (e.path().extension() == ".npy" &&
-            e.path().filename().string().rfind("image_", 0) == 0) {
-            files.push_back(e.path());
+    vector<string> files;
+    DIR* d = opendir(images_dir.c_str());
+    if (!d) throw runtime_error("Impossibile aprire la directory: " + images_dir);
+
+    struct dirent* de;
+    while ((de = readdir(d)) != NULL) {
+        string name = de->d_name;
+        if (starts_with(name, "image_") && ends_with(name, ".npy")) {
+            files.push_back(images_dir + "/" + name);
         }
     }
-    std::sort(files.begin(), files.end());
-    if (files.empty()) throw std::runtime_error("Nessuna npy trovata in " + images_dir);
+    closedir(d);
 
-    std::cout << "[IMG] Trovati " << files.size() << " file .npy nella dir." << std::endl << std::flush;
+    sort(files.begin(), files.end());
+    if (files.empty()) throw runtime_error("Nessuna immagine .npy trovata.");
 
-    std::vector<float> all;
-    all.reserve(files.size()*P);
+    if (max_images > 0 && (int)files.size() > max_images) files.resize((size_t)max_images);
 
-    size_t cnt=0;
-    for (auto& f : files) {
-        if ((++cnt % 500) == 0) {
-            std::cout << "[IMG] Caricate " << cnt << " immagini..." << std::endl << std::flush;
-        }
-        cnpy::NpyArray a = cnpy::npy_load(f.string());
-        if (a.shape.size() == 2 && a.shape[0]==H && a.shape[1]==W) {
+    int N = (int)files.size();
+    cout << "[IMG] Carico " << N << " file .npy..." << endl;
+
+    vector<float> all((size_t)N * P);
+
+    for (int idx = 0; idx < N; ++idx) {
+        if ((idx + 1) % 500 == 0) cout << "  [IMG] Caricate " << (idx + 1) << " immagini" << endl;
+
+        cnpy::NpyArray a = cnpy::npy_load(files[idx]);
+        float* dst = all.data() + (size_t)idx * P;
+
+        if (a.shape.size() == 2 && a.shape[0] == (size_t)H && a.shape[1] == (size_t)W) {
             if (a.word_size == sizeof(uint8_t)) {
                 const uint8_t* p = a.data<uint8_t>();
-                for (int i=0;i<P;++i) all.push_back(p[i] / 255.0f);
+                for (int i = 0; i < P; ++i) dst[i] = p[i] / 255.0f;
             } else if (a.word_size == sizeof(float)) {
                 const float* p = a.data<float>();
-                all.insert(all.end(), p, p+P);
+                copy(p, p + P, dst);
             } else {
-                throw std::runtime_error("Formato immagine non supportato (224x224)");
+                throw runtime_error("Formato immagine non supportato (224x224)");
             }
-        } else if (a.shape.size()==1 && a.shape[0]==P) {
-            if (a.word_size != sizeof(float))
-                throw std::runtime_error("Immagine flatten deve essere float32");
+        }
+        else if (a.shape.size() == 1 && a.shape[0] == (size_t)P) {
+            if (a.word_size != sizeof(float)) throw runtime_error("Immagine flatten deve essere float32");
             const float* p = a.data<float>();
-            all.insert(all.end(), p, p+P);
-        } else {
-            throw std::runtime_error("Dimensione inattesa in " + f.string());
+            copy(p, p + P, dst);
+        }
+        else {
+            throw runtime_error("Dimensione inattesa in " + files[idx]);
         }
     }
-    N_out = files.size();
-    std::cout << "[IMG] Caricate " << N_out << " immagini totali." << std::endl << std::flush;
+
+    N_out = N;
+    cout << "[IMG] OK. N=" << N_out << "\n";
     return all;
 }
 
-
-// (opzionale) sequenziale CPU per confronto tempi/correttezza
-static std::vector<float> cpu_dot_scores(const std::vector<float>& imgs,
-                                         const std::vector<float>& w,
-                                         size_t N) {
-    std::vector<float> s(N, 0.0f);
-    for (size_t n=0;n<N;++n) {
-        const float* img = imgs.data() + n*P;
-        double acc=0.0;
-        for (int i=0;i<P;++i) acc += img[i]*w[i];
-        s[n] = static_cast<float>(acc);
+// baseline CPU opzionale
+static vector<float> cpu_dot_scores(const vector<float>& imgs,
+                                    const vector<float>& w,
+                                    int N) {
+    vector<float> s(N);
+    for (int n = 0; n < N; ++n) {
+        const float* img = imgs.data() + (size_t)n * P;
+        double acc = 0.0;
+        for (int i = 0; i < P; ++i) acc += img[i] * w[i];
+        s[n] = (float)acc;
     }
     return s;
 }
 
-// -------- MAIN --------
+// ------------------------------------ MAIN ------------------------------------
+
 int main(int argc, char** argv) {
     try {
-        // Path di default
-        std::string weights_path = "../data/weights/static_weights_224x224.npy";
-        std::string images_batch = "../data/images_batch_224x224.npy"; // se non esiste, usa directory
-        std::string images_dir   = "../data/ChestMNIST_Images";
-        std::string out_scores   = "../results/scores_gpu.npy";
-        bool run_cpu_baseline = true;
-        int block_size = 256;
+        string weights_path = "../data/weights/static_weights_224x224.npy";
+        string images_batch = "../data/images_batch_224x224.npy";
+        string images_dir   = "../data/ChestMNIST_Images";
+        string out_scores   = "../results/scores_gpu.npy";
+        int block_size = 256;   // potenza di 2 consigliata
+        int max_images = -1;    // -1 = nessun limite
+        bool run_cpu = true;
 
-        // parse argomenti semplici
-        for (int i=1;i<argc;++i) {
-            if (!std::strcmp(argv[i], "--weights") && i+1<argc) weights_path = argv[++i];
-            else if (!std::strcmp(argv[i], "--batch") && i+1<argc) images_batch = argv[++i];
-            else if (!std::strcmp(argv[i], "--images") && i+1<argc) images_dir = argv[++i];
-            else if (!std::strcmp(argv[i], "--out") && i+1<argc) out_scores = argv[++i];
-            else if (!std::strcmp(argv[i], "--bs") && i+1<argc) block_size = std::stoi(argv[++i]);
-            else if (!std::strcmp(argv[i], "--no-cpu")) run_cpu_baseline = false;
+        for (int i = 1; i < argc; ++i) {
+            if (!strcmp(argv[i], "--weights") && i + 1 < argc) weights_path = argv[++i];
+            else if (!strcmp(argv[i], "--batch") && i + 1 < argc) images_batch = argv[++i];
+            else if (!strcmp(argv[i], "--images") && i + 1 < argc) images_dir = argv[++i];
+            else if (!strcmp(argv[i], "--out")    && i + 1 < argc) out_scores = argv[++i];
+            else if (!strcmp(argv[i], "--bs")     && i + 1 < argc) block_size = atoi(argv[++i]);
+            else if (!strcmp(argv[i], "--max-img")&& i + 1 < argc) max_images = atoi(argv[++i]);
+            else if (!strcmp(argv[i], "--no-cpu")) run_cpu = false;
         }
 
-        // crea cartella results
-        try { fs::create_directories(fs::path(out_scores).parent_path()); } catch(...) {}
+        // carica
+        vector<float> weights = load_weights_or_die(weights_path);
 
-        // Carica pesi (normalizzati a somma = 1)
-        auto weights = load_weights_or_die(weights_path);
+        int N = 0;
+        vector<float> images = load_images_batch_or_dir(images_batch, images_dir, max_images, N);
+        cout << "[SET] N=" << N << ", P=" << P << ", block_size=" << block_size << endl;
 
-        // Carica immagini (batch o dir)
-        size_t N = 0;
-        auto images = load_images_batch_or_dir(images_batch, images_dir, N);
-        if (images.size() != N*P) throw std::runtime_error("Dimensioni immagini non coerenti");
-
-        std::cout << "N = " << N << ", P = " << P << ", block_size = " << block_size << std::endl;
-
-        // --- CPU baseline (opzionale) ---
-        std::vector<float> cpu_scores;
+        // CPU baseline
+        vector<float> cpu_scores;
         double cpu_ms = 0.0;
-        if (run_cpu_baseline) {
-            auto t0 = std::chrono::high_resolution_clock::now();
+        if (run_cpu) {
+            auto t0 = chrono::high_resolution_clock::now();
             cpu_scores = cpu_dot_scores(images, weights, N);
-            auto t1 = std::chrono::high_resolution_clock::now();
-            cpu_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            std::cout << "[CPU] dot total: " << cpu_ms << " ms" << std::endl;
+            auto t1 = chrono::high_resolution_clock::now();
+            cpu_ms = chrono::duration<double, milli>(t1 - t0).count();
+            cout << "[CPU] dot total: " << cpu_ms << " ms" << endl;
         }
 
-        // --- GPU alloc ---
-        float *d_images=nullptr, *d_weights=nullptr, *d_scores=nullptr;
-        CHECK_CUDA(cudaMalloc((void**)&d_images,  N*P*sizeof(float)));
-        CHECK_CUDA(cudaMalloc((void**)&d_weights, P*sizeof(float)));
-        CHECK_CUDA(cudaMalloc((void**)&d_scores,  N*sizeof(float)));
+        // GPU
+        float *d_images = NULL, *d_weights = NULL, *d_scores = NULL;
+        CHECK_CUDA(cudaMalloc((void**)&d_images,  (size_t)N * P * sizeof(float)));
+        CHECK_CUDA(cudaMalloc((void**)&d_weights, (size_t)P * sizeof(float)));
+        CHECK_CUDA(cudaMalloc((void**)&d_scores,  (size_t)N * sizeof(float)));
 
-        // copy H2D
-        CHECK_CUDA(cudaMemcpy(d_images,  images.data(),  N*P*sizeof(float), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(d_weights, weights.data(), P*sizeof(float),   cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_images,  images.data(),  (size_t)N * P * sizeof(float), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_weights, weights.data(), (size_t)P * sizeof(float),     cudaMemcpyHostToDevice));
 
-        // --- GPU kernel ---
-        dim3 grid(N);
-        dim3 block(block_size);
-        size_t shmem = block_size * sizeof(float);
+        dim3 grid((unsigned int)N);
+        dim3 block((unsigned int)block_size);
+        size_t shmem = (size_t)block_size * sizeof(float);
 
         cudaEvent_t ev_start, ev_stop;
         CHECK_CUDA(cudaEventCreate(&ev_start));
@@ -271,37 +305,35 @@ int main(int argc, char** argv) {
 
         float gpu_ms = 0.0f;
         CHECK_CUDA(cudaEventElapsedTime(&gpu_ms, ev_start, ev_stop));
-        std::cout << "[GPU] kernel time: " << gpu_ms << " ms" << std::endl;
+        cout << "[GPU] kernel time: " << gpu_ms << " ms" << endl;
 
-        // copy D2H
-        std::vector<float> scores(N);
-        CHECK_CUDA(cudaMemcpy(scores.data(), d_scores, N*sizeof(float), cudaMemcpyDeviceToHost));
+        vector<float> scores(N);
+        CHECK_CUDA(cudaMemcpy(scores.data(), d_scores, (size_t)N * sizeof(float), cudaMemcpyDeviceToHost));
 
-        // confronta con CPU (se fatto)
-        if (run_cpu_baseline) {
+        if (run_cpu) {
             double mae = 0.0, maxae = 0.0;
-            for (size_t i=0;i<N;++i) {
-                double ae = std::abs((double)scores[i] - (double)cpu_scores[i]);
+            for (int i = 0; i < N; ++i) {
+                double ae = fabs((double)scores[i] - (double)cpu_scores[i]);
                 mae += ae;
                 if (ae > maxae) maxae = ae;
             }
-            mae /= N;
-            std::cout << "Confronto CPU vs GPU -> MAE: " << mae << "  maxAE: " << maxae << std::endl;
+            if (N > 0) mae /= N;
+            cout << "[CHK] CPU vs GPU -> MAE: " << mae << "  maxAE: " << maxae << endl;
         }
 
-        // salva risultati GPU
         save_scores_npy(out_scores, scores);
 
-        // cleanup
         CHECK_CUDA(cudaFree(d_images));
         CHECK_CUDA(cudaFree(d_weights));
         CHECK_CUDA(cudaFree(d_scores));
         CHECK_CUDA(cudaEventDestroy(ev_start));
         CHECK_CUDA(cudaEventDestroy(ev_stop));
 
+        cout << "[OK] Fine" << endl;
         return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "Errore: " << e.what() << std::endl;
+
+    } catch (const exception& e) {
+        cerr << "Errore: " << e.what() << endl;
         return 1;
     }
 }
