@@ -61,7 +61,7 @@ __global__ void dot_per_image_kernel(const float* __restrict__ images,
 static std::vector<float> load_weights_or_die(const std::string& path) {
     std::cout << "Carico pesi: " << path << std::endl;
     cnpy::NpyArray arr = cnpy::npy_load(path);
-    std::cout << "Pesi caricati. Shape: " << weights_array.shape[0] << "x" << weights_array.shape[1] << std::endl;
+    std::cout << "Pesi caricati. Shape: " << arr.shape[0] << "x" << weights_array.shape[1] << std::endl;
 
     if (arr.shape.size() != 2 || arr.shape[0] != H || arr.shape[1] != W)
         throw std::runtime_error("weights.npy deve essere 224x224");
