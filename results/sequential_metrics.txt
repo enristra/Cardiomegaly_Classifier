@@ -1,0 +1,9 @@
+Threshold: 0.437035
+Accuracy: 62%
+Sensitivity: 100%
+Specificity: 61.2245%
+Precision: 5%
+
+Confusion Matrix (TN FP / FN TP):
+30 19
+0 1
