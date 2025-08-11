@@ -34,6 +34,8 @@ sequential_classifier
 
 *.npy
 
+!data/weights/*.npy
+
 build/
 
 .cmake/
