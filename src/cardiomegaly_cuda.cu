@@ -162,8 +162,8 @@ static std::vector<float> cpu_dot_scores(const std::vector<float>& imgs,
 // -------- MAIN --------
 int main(int argc, char** argv) {
     try {
-        // Path di default (adegua ai tuoi)
-        std::string weights_path = "../static_weights/static_weights_224x224.npy";
+        // Path di default
+        std::string weights_path = "../data/weights/static_weights_224x224.npy";
         std::string images_batch = "../data/images_batch_224x224.npy"; // se non esiste, usa directory
         std::string images_dir   = "../data/ChestMNIST_Images";
         std::string out_scores   = "../results/scores_gpu.npy";
