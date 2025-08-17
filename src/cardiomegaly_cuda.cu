@@ -14,7 +14,7 @@ using namespace std;
 
 #define H 224
 #define W 224
-#define P (X*W)
+#define P (H*W)
 
 
 
@@ -32,16 +32,18 @@ static int dir_exists(const char* path){
 }
 
 
+//--------KERNEL
 
 __global__ void dot_kernel(const float *images, const float *weights, float *scores, int pixels_per_img) {
     int img_idx = blockIdx.x;
     int tid = threadIdx.x;
+
     extern __shared__ float sdata[];
 
-    const float *img = images + img_idx * P;
+    const float *img = images + img_idx * pixels_per_img;
 
     float sum = 0.0f;
-    for (int i = tid; i < P; i += blockDim.x) {
+    for (int i = tid; i < pixels_per_img; i += blockDim.x) {
         sum += img[i] * weights[i];
     }
 
@@ -60,30 +62,43 @@ __global__ void dot_kernel(const float *images, const float *weights, float *sco
     }
 }
 
+//----------------I/O------
+
+
 float* load_weights(const char* filename) {
     cnpy::NpyArray arr = cnpy::npy_load(filename);
-    if (arr.shape.size() != 2 || arr.shape[0] != H || arr.shape[1] != W) {
-        printf("Errore: dimensione pesi non valida\n");
+    if (arr.shape.size() != 2 || arr.shape[0] != (size_t)H || arr.shape[1] != (size_t)W) {
+        printf("Errore: dimensione pesi non valida (atteso 224x224)\n");
+        exit(1);
+    }
+    if(arr.word_size != sizeof(float)){
+        printf("Errore: tipo pesi non supportato (atteso float32)\n");
+        exit(1);
+    }
+
+
+    if(!weights){
+        printf("Errore malloc pesi\n");
         exit(1);
     }
     float *weights = (float*)malloc(P * sizeof(float));
-    if (arr.word_size == sizeof(float)) {
-        float* p = arr.data<float>();
-        for (int i = 0; i < P; i++) weights[i] = p[i];
-    } else {
-        printf("Errore: tipo pesi non supportato\n");
-        exit(1);
-    }
+
+    
+    float* p = arr.data<float>();
+    for (int i = 0; i < P; i++) weights[i] = p[i];
+        
+    
     return weights;
 }
 
 float* load_images(const char* filename, int *N) {
     cnpy::NpyArray arr = cnpy::npy_load(filename);
-    if (arr.shape.size() != 2 || arr.shape[1] != P) {
+    if (arr.shape.size() != 2 || arr.shape[1] != (size_t)P) {
         printf("Errore: dimensione immagini non valida\n");
         exit(1);
     }
-    *N = arr.shape[0];
+
+    *N = (int)arr.shape[0];
     float *images = (float*)malloc((*N) * P * sizeof(float));
     if (arr.word_size == sizeof(float)) {
         float* p = arr.data<float>();
@@ -96,7 +111,7 @@ float* load_images(const char* filename, int *N) {
 }
 
 void save_scores(const char* filename, float *scores, int N) {
-    std::vector<size_t> shape = { (size_t)N };
+    vector<size_t> shape = { (size_t)N };
     cnpy::npy_save(filename, scores, shape, "w");
 }
 
@@ -110,29 +125,101 @@ int main(int argc, char** argv) {
     const char* images_path = argv[2];
     const char* out_path = argv[3];
 
-    int N;
+    
+    //caricamento dati host
+    int N = 0;
     float *weights = load_weights(weights_path);
     float *images = load_images(images_path, &N);
     float *scores = (float*)malloc(N * sizeof(float));
+    if(!scores){printf("Errore malloc scores\n"); return 1;}
 
-    float *d_images, *d_weights, *d_scores;
-    cudaMalloc((void**)&d_images, N * P * sizeof(float));
-    cudaMalloc((void**)&d_weights, P * sizeof(float));
-    cudaMalloc((void**)&d_scores, N * sizeof(float));
 
-    cudaMemcpy(d_images, images, N * P * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_weights, weights, P * sizeof(float), cudaMemcpyHostToDevice);
+    cudaError_t err;
+    size_t bytes_imgs= (size_t)N * P * sizeof(float);
+    size_t bytes_w    = (size_t)P * sizeof(float);
+    size_t bytes_out  = (size_t)N * sizeof(float);
+
+    float *d_images = NULL, *d_weights = NULL, *d_scores = NULL;
+
+
+    
+    
+
+    //Allocazione memoria
+    err =  cudaMalloc((void**)&d_images, bytes_imgs);
+    if(err != cudaSuccess){
+        printf("Errore allocazione d_images: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+
+    err = cudaMalloc ((void**)&d_weights, bytes_w);
+    if (err != cudaSuccess){
+        printf("Errore allocazione d_weights: %s\n");
+        return 1;
+    }
+
+    err = cudaMalloc((void**)&d_scores, bytes_out);
+    if(err != cudaSuccess){
+        printf("Errore allocazione d_scores: %s\n");
+        return 1;
+    }
+
+    printf("Memoria allocata con successo sulla GPU. \n")
+
+
+    // Trasferimento dati
+
+    err = cudaMemcpy(d_images, images, bytes_imgs, cudaMemcpyHostToDevice);
+
+    if(err != cudaSuccess){
+        printf("Errore cudaMemcpy H2D images: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+
+
+    err = cudaMemcpy(d_weights, weights, bytes_w, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess){
+        printf("Errore cudaMemcpy H2D weights: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
 
     int blockSize = 256;
-    dot_kernel<<<N, blockSize, blockSize * sizeof(float)>>>(d_images, d_weights, d_scores, N);
+    size_t shmem = (size_t)blockSize * sizeof(float);
 
-    cudaMemcpy(scores, d_scores, N * sizeof(float), cudaMemcpyDeviceToHost);
+    dot_kernel<<<N, blockSize, shmem >>>(d_images, d_weights, d_scores, P);
+
+    err= cudaGetLastError();
+    if (err != cudaSuccess){
+        printf("Errore nel lancio del kernel: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+
+    cudaMemcpy(scores, d_scores, bytes_out, cudaMemcpyDeviceToHost);
+
+    if (err != cudaSuccess){
+        printf("Errore cudaMemcpy D2H scores: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+
+    err =cudaDeviceSynchronize();
+    if (err != cudaSuccess){
+        printf("Errore in cudaDeviceSynchronize: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
 
     save_scores(out_path, scores, N);
 
-    cudaFree(d_images);
-    cudaFree(d_weights);
-    cudaFree(d_scores);
+    err = cudaFree(d_images);
+    if (err != cudaSuccess) printf("Warning cudaFree(d_images): %s\n", cudaGetErrorString(err));
+
+
+    err = cudaFree(d_weights);
+    if (err != cudaSuccess) printf("Warning cudaFree(d_weights): %s\n", cudaGetErrorString(err));
+
+    err = cudaFree(d_scores);
+    if (err != cudaSuccess) printf("Warning cudaFree(d_scores): %s\n", cudaGetErrorString(err));
+
+
     free(weights);
     free(images);
     free(scores);
