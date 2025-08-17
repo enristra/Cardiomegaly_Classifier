@@ -22,3 +22,4 @@ fi
 
 # Esegue lo script Python
 python generate_weights.py
+
