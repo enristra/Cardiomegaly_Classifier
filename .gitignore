@@ -63,5 +63,10 @@ env/
 .env/
 
 .ipynb_checkpoints
+
 *.ipynb
 
+*.csv
+
+*.docx
+*.txt

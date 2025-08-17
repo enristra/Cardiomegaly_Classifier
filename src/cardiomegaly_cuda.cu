@@ -1,13 +1,39 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <cuda_runtime.h>
+#include <dirent.h>
+#include <sys/stat.h>
+
+#include <string>
+#include <vector>
+#include <algorithm>
 #include "cnpy.h"
+
+using namespace std;
 
 #define H 224
 #define W 224
-#define P (H*W)
+#define P (X*W)
 
-__global__ void dot_kernel(const float *images, const float *weights, float *scores, int N) {
+
+
+//Utilities
+static int file_exists(const char* path){
+    FILE* f = fopen(path, "rb");
+    if(!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int dir_exists(const char* path){
+    struct  stat st;
+    return (stat(path, &st)==0) && S_ISDIR(st.st_mode);
+}
+
+
+
+__global__ void dot_kernel(const float *images, const float *weights, float *scores, int pixels_per_img) {
     int img_idx = blockIdx.x;
     int tid = threadIdx.x;
     extern __shared__ float sdata[];

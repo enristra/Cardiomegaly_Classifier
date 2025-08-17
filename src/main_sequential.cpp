@@ -53,8 +53,7 @@ private:
     float threshold;
     
 public:
-    CardiomegalyClassifier(const std::string& weights_file, const std::string& labels_file, 
-                          float classification_threshold = 0.5f) 
+    CardiomegalyClassifier(const std::string& weights_file, const std::string& labels_file, float classification_threshold = 0.5f) 
         : threshold(classification_threshold) {
         loadWeights(weights_file);
         loadLabels(labels_file);
@@ -109,21 +108,11 @@ public:
         labels.clear();
         labels.reserve(num_samples);
 
-        if (arr.word_size == sizeof(int32_t)) {
-            int32_t* data = arr.data<int32_t>();
-            for (size_t i = 0; i < num_samples; ++i) {
-                labels.push_back(static_cast<int>(data[i * arr.shape[1] + label_index_cardiomegaly]));
-            }
-        } else if (arr.word_size == sizeof(int64_t)) {
-            int64_t* data = arr.data<int64_t>();
-            for (size_t i = 0; i < num_samples; ++i) {
-                labels.push_back(static_cast<int>(data[i * arr.shape[1] + label_index_cardiomegaly]));
-            }
-        } else if (arr.word_size == sizeof(float)) {
-            float* data = arr.data<float>();
-            for (size_t i = 0; i < num_samples; ++i) {
-                labels.push_back(static_cast<int>(data[i * arr.shape[1] + label_index_cardiomegaly]));
-            }
+        if (arr.word_size == sizeof(uint8_t)) {
+        uint8_t* data = arr.data<uint8_t>();
+        for (size_t i = 0; i < num_samples; ++i) {
+            labels.push_back(static_cast<int>(data[i * arr.shape[1] + label_index_cardiomegaly]));
+        }
         } else {
             throw std::runtime_error("Tipo di label non supportato in labels.npy.");
         }
@@ -182,8 +171,13 @@ public:
         std::sort(image_files.begin(), image_files.end());
         
         std::cout << "Classificazione di " << image_files.size() << " immagini..." << std::endl;
-        
-        for (size_t i = 0; i < 200 && i < labels.size(); ++i) {
+        size_t max_n = std::min(image_files.size(), labels.size());
+        if (max_n == 0){
+            std::cerr << "Nessuna coppia (immagine, label) trovata\n";
+            return{};
+        }
+
+        for (size_t i = 0; i < max_n; ++i) {
             try {
                 ClassificationResult result;
                 result.filename = image_files[i].filename().string();
@@ -251,7 +245,7 @@ void printResults(const std::vector<ClassificationResult>& results, const Metric
     }
 }
 
-// --- (opzionale) auto-tuning soglia come funzione riutilizzabile ---
+//auto-tuning soglia come funzione riutilizzabile ---
 static float findBestThreshold(const std::vector<ClassificationResult>& results) {
     std::vector<float> scores; scores.reserve(results.size());
     for (const auto& r : results) scores.push_back(r.score);
@@ -282,7 +276,7 @@ static float findBestThreshold(const std::vector<ClassificationResult>& results)
 
 static void write_results_csv(const std::string& path, const std::vector<ClassificationResult>& results){
     std::ofstream ofs(path);
-    ofs <<"filename,score;pred,actual,correct\n";
+    ofs <<"filename,score,pred,actual,correct\n";
     for (const auto& r: results){
         ofs <<r.filename << "," <<r.score << ","
             << (r.predicted ? 1 : 0) << ","
@@ -309,8 +303,8 @@ int main(int argc, char** argv) {
     try {
         // Usa i pesi statici generati
         std::string weights_file = "../data/weights/static_weights_224x224.npy";
-        std::string labels_file  = "../data/ChestMNIST_Images/labels.npy";
-        std::string images_dir   = "../data/ChestMNIST_Images";
+        std::string labels_file  = "../data/labels.npy";
+        std::string images_dir   = "../data/images";
         
         //output di default
         std::string out_csv="../results/sequential_scores.csv";
