@@ -127,19 +127,17 @@ int main(int argc, char** argv) {
 
     
     //caricamento dati host
-    int N = 0;
-    float *weights = load_weights(weights_path);
-    float *images = load_images(images_path, &N);
-    float *scores = (float*)malloc(N * sizeof(float));
-    if(!scores){printf("Errore malloc scores\n"); return 1;}
-
-
+    
     cudaError_t err;
-    size_t bytes_imgs= (size_t)N * P * sizeof(float);
-    size_t bytes_w    = (size_t)P * sizeof(float);
-    size_t bytes_out  = (size_t)N * sizeof(float);
+size_t bytes_imgs= (size_t)N * P * sizeof(float);
+size_t bytes_w    = (size_t)P * sizeof(float);
+size_t bytes_out  = (size_t)N * sizeof(float);
 
-    float *d_images = NULL, *d_weights = NULL, *d_scores = NULL;
+float *d_images = NULL, *d_weights = NULL, *d_scores = NULL;
+
+int N;
+float *weights = load_weights(weights_path);
+float *images = load_images(images_path, &N);
 
 
     
@@ -164,7 +162,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("Memoria allocata con successo sulla GPU. \n")
+    printf("Memoria allocata con successo sulla GPU. \n");
 
 
     // Trasferimento dati
