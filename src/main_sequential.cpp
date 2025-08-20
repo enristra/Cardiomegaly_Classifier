@@ -9,10 +9,12 @@
 #include <fstream>
 #include <cstring>
 
+using namespace std;
 namespace fs = std::filesystem;
 
+
 struct ClassificationResult {
-    std::string filename;
+    string filename;
     float score;
     bool predicted;
     bool actual;
@@ -48,23 +50,23 @@ struct Metrics {
 
 class CardiomegalyClassifier {
 private:
-    std::vector<float> weights;   // 224*224
-    std::vector<int> labels;      // N
+    vector<float> weights;   // 224*224
+    vector<int> labels;      // N
     float threshold;
     
 public:
-    CardiomegalyClassifier(const std::string& weights_file, const std::string& labels_file, float classification_threshold = 0.5f) 
+    CardiomegalyClassifier(const string& weights_file, const string& labels_file, float classification_threshold = 0.5f) 
         : threshold(classification_threshold) {
         loadWeights(weights_file);
         loadLabels(labels_file);
     }
     
-    void loadWeights(const std::string& filename) {
-        std::cout << "Caricamento pesi da: " << filename << std::endl;
+    void loadWeights(const string& filename) {
+        cout << "Caricamento pesi da: " << filename << endl;
         cnpy::NpyArray arr = cnpy::npy_load(filename);
         
         if (arr.shape.size() != 2 || arr.shape[0] != 224 || arr.shape[1] != 224) {
-            throw std::runtime_error("I pesi devono essere 224x224");
+            throw runtime_error("I pesi devono essere 224x224");
         }
         
         // Converti a float se necessario
@@ -78,7 +80,7 @@ public:
                 weights.push_back(static_cast<float>(data[i]));
             }
         } else {
-            throw std::runtime_error("Tipo di peso non supportato");
+            throw runtime_error("Tipo di peso non supportato");
         }
 
         // Normalizza i pesi in modo che sommino a 1 (media pesata dei pixel)
@@ -86,20 +88,20 @@ public:
         for (float w : weights) s += w;
         if (s > 0) {
             for (float& w : weights) w = static_cast<float>(w / s);
-            std::cout << "Pesi normalizzati: somma = 1.0\n";
+            cout << "Pesi normalizzati: somma = 1.0\n";
         } else {
-            std::cout << "Attenzione: somma pesi = 0, nessuna normalizzazione applicata.\n";
+            cout << "Attenzione: somma pesi = 0, nessuna normalizzazione applicata.\n";
         }
         
-        std::cout << "Pesi caricati: " << weights.size() << " elementi" << std::endl;
+        cout << "Pesi caricati: " << weights.size() << " elementi" << endl;
     }
     
-    void loadLabels(const std::string& filename) {
-        std::cout << "Caricamento labels da: " << filename << std::endl;
+    void loadLabels(const string& filename) {
+        cout << "Caricamento labels da: " << filename << endl;
         cnpy::NpyArray arr = cnpy::npy_load(filename);
         
         if (arr.shape.size() != 2 || arr.shape[1] != 14) {
-            throw std::runtime_error("Le labels devono essere (N,14) come ChestMNIST.");
+            throw runtime_error("Le labels devono essere (N,14) come ChestMNIST.");
         }
 
         size_t num_samples = arr.shape[0];
@@ -114,16 +116,16 @@ public:
             labels.push_back(static_cast<int>(data[i * arr.shape[1] + label_index_cardiomegaly]));
         }
         } else {
-            throw std::runtime_error("Tipo di label non supportato in labels.npy.");
+            throw runtime_error("Tipo di label non supportato in labels.npy.");
         }
         
-        std::cout << "Labels caricate: " << labels.size() << " elementi (solo cardiomegalia)" << std::endl;
+        cout << "Labels caricate: " << labels.size() << " elementi (solo cardiomegalia)" << endl;
     }
     
-    float calculateScore(const std::string& image_file) {
+    float calculateScore(const string& image_file) {
         cnpy::NpyArray arr = cnpy::npy_load(image_file);
         
-        std::vector<float> image_data;
+        vector<float> image_data;
         
         if (arr.word_size == sizeof(uint8_t)) {
             // Normalizza in [0,1] (NON più in [-1,1])
@@ -137,12 +139,12 @@ public:
             float* data = arr.data<float>();
             image_data.assign(data, data + arr.num_vals);
         } else {
-            throw std::runtime_error("Tipo di immagine non supportato");
+            throw runtime_error("Tipo di immagine non supportato");
         }
         
         size_t pixels_per_channel = 224 * 224;
         if (image_data.size() % pixels_per_channel != 0) {
-            throw std::runtime_error("Dimensioni immagine non valide");
+            throw runtime_error("Dimensioni immagine non valide");
         }
         size_t num_channels = image_data.size() / pixels_per_channel;
 
@@ -158,22 +160,22 @@ public:
         return total_score / static_cast<float>(num_channels);
     }
     
-    std::vector<ClassificationResult> classifyAll(const std::string& images_dir) {
-        std::vector<ClassificationResult> results;
+    vector<ClassificationResult> classifyAll(const string& images_dir) {
+        vector<ClassificationResult> results;
         
-        std::vector<fs::path> image_files;
+        vector<fs::path> image_files;
         for (const auto& entry : fs::directory_iterator(images_dir)) {
             if (entry.path().extension() == ".npy" && 
                 entry.path().filename().string().find("image_") == 0) {
                 image_files.push_back(entry.path());
             }
         }
-        std::sort(image_files.begin(), image_files.end());
+        sort(image_files.begin(), image_files.end());
         
-        std::cout << "Classificazione di " << image_files.size() << " immagini..." << std::endl;
-        size_t max_n = std::min(image_files.size(), labels.size());
+        cout << "Classificazione di " << image_files.size() << " immagini..." << endl;
+        size_t max_n = min(image_files.size(), labels.size());
         if (max_n == 0){
-            std::cerr << "Nessuna coppia (immagine, label) trovata\n";
+            cerr << "Nessuna coppia (immagine, label) trovata\n";
             return{};
         }
 
@@ -187,17 +189,17 @@ public:
                 result.correct = (result.predicted == result.actual);
                 results.push_back(result);
                 if ((i + 1) % 50 == 0) {
-                    std::cout << "Elaborate " << (i + 1) << " immagini..." << std::endl;
+                    cout << "Elaborate " << (i + 1) << " immagini..." << endl;
                 }
-            } catch (const std::exception& e) {
-                std::cerr << "Errore in " << image_files[i].filename() 
-                         << ": " << e.what() << std::endl;
+            } catch (const exception& e) {
+                cerr << "Errore in " << image_files[i].filename() 
+                         << ": " << e.what() << endl;
             }
         }
         return results;
     }
     
-    Metrics calculateMetrics(const std::vector<ClassificationResult>& results) {
+    Metrics calculateMetrics(const vector<ClassificationResult>& results) {
         Metrics m;
         for (const auto& r : results) {
             if (r.predicted && r.actual) m.true_positives++;
@@ -213,44 +215,44 @@ public:
 };
 
 // stampa risultati (identico al tuo)
-void printResults(const std::vector<ClassificationResult>& results, const Metrics& metrics) {
-    std::cout << "\n=== RISULTATI CLASSIFICAZIONE ===" << std::endl;
-    std::cout << std::fixed << std::setprecision(3);
+void printResults(const vector<ClassificationResult>& results, const Metrics& metrics) {
+    cout << "\n=== RISULTATI CLASSIFICAZIONE ===" << endl;
+    cout << fixed << setprecision(3);
     
-    std::cout << "\nMETRICHE:" << std::endl;
-    std::cout << "Accuracy:    " << metrics.accuracy() * 100 << "%" << std::endl;
-    std::cout << "Sensitivity: " << metrics.sensitivity() * 100 << "%" << std::endl;
-    std::cout << "Specificity: " << metrics.specificity() * 100 << "%" << std::endl;
-    std::cout << "Precision:   " << metrics.precision() * 100 << "%" << std::endl;
+    cout << "\nMETRICHE:" << endl;
+    cout << "Accuracy:    " << metrics.accuracy() * 100 << "%" << endl;
+    cout << "Sensitivity: " << metrics.sensitivity() * 100 << "%" << endl;
+    cout << "Specificity: " << metrics.specificity() * 100 << "%" << endl;
+    cout << "Precision:   " << metrics.precision() * 100 << "%" << endl;
     
-    std::cout << "\nCONFUSION MATRIX:" << std::endl;
-    std::cout << "                 Predicted" << std::endl;
-    std::cout << "                 Neg   Pos" << std::endl;
-    std::cout << "Actual    Neg   " << std::setw(4) << metrics.true_negatives 
-              << "  " << std::setw(4) << metrics.false_positives << std::endl;
-    std::cout << "          Pos   " << std::setw(4) << metrics.false_negatives 
-              << "  " << std::setw(4) << metrics.true_positives << std::endl;
+    cout << "\nCONFUSION MATRIX:" << endl;
+    cout << "                 Predicted" << endl;
+    cout << "                 Neg   Pos" << endl;
+    cout << "Actual    Neg   " << setw(4) << metrics.true_negatives 
+              << "  " << setw(4) << metrics.false_positives << endl;
+    cout << "          Pos   " << setw(4) << metrics.false_negatives 
+              << "  " << setw(4) << metrics.true_positives << endl;
     
-    std::cout << "\nPRIMI 10 RISULTATI:" << std::endl;
-    std::cout << "File                Score    Pred  Actual  Correct" << std::endl;
-    std::cout << "------------------------------------------------" << std::endl;
+    cout << "\nPRIMI 10 RISULTATI:" << endl;
+    cout << "File                Score    Pred  Actual  Correct" << endl;
+    cout << "------------------------------------------------" << endl;
     
-    for (size_t i = 0; i < std::min<size_t>(10, results.size()); ++i) {
+    for (size_t i = 0; i < min<size_t>(10, results.size()); ++i) {
         const auto& r = results[i];
-        std::cout << std::setw(15) << r.filename.substr(0, 15) << "  "
-                  << std::setw(7) << r.score << "  "
-                  << std::setw(4) << (r.predicted ? "POS" : "NEG") << "  "
-                  << std::setw(6) << (r.actual ? "POS" : "NEG") << "  "
-                  << (r.correct ? "✓" : "✗") << std::endl;
+        cout << setw(15) << r.filename.substr(0, 15) << "  "
+                  << setw(7) << r.score << "  "
+                  << setw(4) << (r.predicted ? "POS" : "NEG") << "  "
+                  << setw(6) << (r.actual ? "POS" : "NEG") << "  "
+                  << (r.correct ? "✓" : "✗") << endl;
     }
 }
 
 //auto-tuning soglia come funzione riutilizzabile ---
-static float findBestThreshold(const std::vector<ClassificationResult>& results) {
-    std::vector<float> scores; scores.reserve(results.size());
+static float findBestThreshold(const vector<ClassificationResult>& results) {
+    vector<float> scores; scores.reserve(results.size());
     for (const auto& r : results) scores.push_back(r.score);
-    std::sort(scores.begin(), scores.end());
-    scores.erase(std::unique(scores.begin(), scores.end()), scores.end());
+    sort(scores.begin(), scores.end());
+    scores.erase(unique(scores.begin(), scores.end()), scores.end());
     if (scores.empty()) return 0.5f;
 
     auto eval_at = [&](float th){
@@ -263,7 +265,7 @@ static float findBestThreshold(const std::vector<ClassificationResult>& results)
             else m.true_negatives++;
         }
         float J = m.sensitivity() + m.specificity() - 1.0f;
-        return std::make_pair(J, m);
+        return make_pair(J, m);
     };
 
     float best_th = scores.front(), best_J = -1e9f;
@@ -274,8 +276,8 @@ static float findBestThreshold(const std::vector<ClassificationResult>& results)
     return best_th;
 }
 
-static void write_results_csv(const std::string& path, const std::vector<ClassificationResult>& results){
-    std::ofstream ofs(path);
+static void write_results_csv(const string& path, const vector<ClassificationResult>& results){
+    ofstream ofs(path);
     ofs <<"filename,score,pred,actual,correct\n";
     for (const auto& r: results){
         ofs <<r.filename << "," <<r.score << ","
@@ -285,8 +287,8 @@ static void write_results_csv(const std::string& path, const std::vector<Classif
     }
 }
 
-static void write_metrics_txt(const std:: string& path, const Metrics& m, float thr){
-    std::ofstream ofs(path);
+static void write_metrics_txt(const  string& path, const Metrics& m, float thr){
+    ofstream ofs(path);
     ofs << "Threshold: " << thr << "\n";
     ofs << "Accuracy: "    << m.accuracy()*100     << "%\n";
     ofs << "Sensitivity: " << m.sensitivity()*100  << "%\n";
@@ -302,13 +304,13 @@ static void write_metrics_txt(const std:: string& path, const Metrics& m, float 
 int main(int argc, char** argv) {
     try {
         // Usa i pesi statici generati
-        std::string weights_file = "../data/weights/static_weights_224x224.npy";
-        std::string labels_file  = "../data/labels.npy";
-        std::string images_dir   = "../data/images";
+        string weights_file = "../data/weights/static_weights_224x224.npy";
+        string labels_file  = "../data/labels.npy";
+        string images_dir   = "../data/images";
         
         //output di default
-        std::string out_csv="../results/sequential_scores.csv";
-        std::string out_metrics="../results/sequential_metrics.txt";
+        string out_csv="../results/sequential_scores.csv";
+        string out_metrics="../results/sequential_metrics.txt";
 
         //parametri
         bool auto_threshold=true;
@@ -317,24 +319,24 @@ int main(int argc, char** argv) {
 
         //parse argomenti
         for (int i=1; i<argc; ++i){
-            if(!std::strcmp(argv[i], "--weights") && i+1 < argc)
+            if(!strcmp(argv[i], "--weights") && i+1 < argc)
                 weights_file = argv[++i];
-            else if (!std::strcmp(argv[i], "--labels") && i+1 <argc) labels_file = argv[++i];
-            else if (!std::strcmp(argv[i], "--images") && i+1 < argc)   images_dir = argv[++i];
-            else if (!std::strcmp(argv[i], "--limit")  && i+1 < argc)   limit = std::stoul(argv[++i]);
-            else if (!std::strcmp(argv[i], "--out-csv") && i+1 < argc)  out_csv = argv[++i];
-            else if (!std::strcmp(argv[i], "--out-metrics") && i+1 < argc) out_metrics = argv[++i];
-            else if (!std::strcmp(argv[i], "--auto-th"))                auto_threshold = true;
-            else if (!std::strcmp(argv[i], "--threshold") && i+1 < argc){ auto_threshold = false; threshold = std::stof(argv[++i]); }
+            else if (!strcmp(argv[i], "--labels") && i+1 <argc) labels_file = argv[++i];
+            else if (!strcmp(argv[i], "--images") && i+1 < argc)   images_dir = argv[++i];
+            else if (!strcmp(argv[i], "--limit")  && i+1 < argc)   limit = stoul(argv[++i]);
+            else if (!strcmp(argv[i], "--out-csv") && i+1 < argc)  out_csv = argv[++i];
+            else if (!strcmp(argv[i], "--out-metrics") && i+1 < argc) out_metrics = argv[++i];
+            else if (!strcmp(argv[i], "--auto-th"))                auto_threshold = true;
+            else if (!strcmp(argv[i], "--threshold") && i+1 < argc){ auto_threshold = false; threshold = stof(argv[++i]); }
         }
         // se serve, crea cartella results
         try
         {
-            std::filesystem::create_directories(std::filesystem::path(out_csv).parent_path());
+            filesystem::create_directories(filesystem::path(out_csv).parent_path());
         }
         catch(...){}
         
-        try { std::filesystem::create_directories(std::filesystem::path(out_metrics).parent_path()); } catch(...) {}
+        try { filesystem::create_directories(filesystem::path(out_metrics).parent_path()); } catch(...) {}
 
         
 
@@ -344,14 +346,14 @@ int main(int argc, char** argv) {
         //classifica (con eventuale limit)
         auto all_results = classifier.classifyAll(images_dir);
 
-        std::vector<ClassificationResult> results;
+        vector<ClassificationResult> results;
 
         results.reserve(all_results.size());
 
         if (limit > 0){
-            for (size_t i = 0; i < std::min(limit, all_results.size()); ++i) results.push_back(all_results[i]);
+            for (size_t i = 0; i < min(limit, all_results.size()); ++i) results.push_back(all_results[i]);
         } else {
-            results = std::move(all_results);
+            results = move(all_results);
         }
 
         //soglia
@@ -377,10 +379,10 @@ int main(int argc, char** argv) {
         write_results_csv(out_csv, results);
         write_metrics_txt(out_metrics, metrics, used_threshold);
 
-        std::cout << "\nSalvati:\n  " << out_csv << "\n  " << out_metrics << std::endl;
+        cout << "\nSalvati:\n  " << out_csv << "\n  " << out_metrics << endl;
         return 0;
-    }catch (const std::exception& e){
-        std::cerr << "Errore: " <<e.what() <<std::endl;
+    }catch (const exception& e){
+        cerr << "Errore: " <<e.what() <<endl;
         return 1;
     }
 

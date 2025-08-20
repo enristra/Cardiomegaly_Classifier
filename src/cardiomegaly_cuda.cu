@@ -1,20 +1,28 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <numeric>
+#include <fstream>
+#include <iostream>
+#include <iomanip>
+#include <filesystem>   // C++17
 #include <cuda_runtime.h>
 #include "cnpy.h"
 
 
 using namespace std;
+namespace fs = std::filesystem;
 
-#define H 224
-#define W 224
-#define P (H*W)
+static int H = 224;
+static int W = 224;
+static int P = H*W;
 
-#define BLOCK_SIZE 256
+static int BLOCK_SIZE = 256;
+static int CARDIOMEGALY_ID= 1;
 
 #define CUDA_CHECK(expr) do {                                     \
     cudaError_t _err = (expr);                                    \
@@ -52,6 +60,7 @@ __global__ void dot_kernel_naive_atomic(const float* __restrict__ images, const 
 
 //--- (2) Baseline con riduzione in shared: più veloce
 __global__ void dot_kernel_reduce_shared(const float * __restrict__ images, const float* __restrict__ weights, float* __restrict__ scores, int pixels_per_img){
+   
     extern __shared__ float sdata[];
     const int img = blockDim.x;
     const int tid = threadIdx.x;
@@ -78,92 +87,168 @@ __global__ void dot_kernel_reduce_shared(const float * __restrict__ images, cons
 
 // I/O (cnpy)
 
-
-static float* load_weights(const char* filename) {
-    cnpy::NpyArray arr = cnpy::npy_load(filename);
-    // accetto shape (H,W) o (P,)
-    if (!((arr.shape.size() == 2 && arr.shape[0] == (size_t)H && arr.shape[1] == (size_t)W) ||
-          (arr.shape.size() == 1 && arr.shape[0] == (size_t)P))) {
-        fprintf(stderr, "Errore: dimensione pesi non valida (atteso 224x224 o 50176)\n");
-        exit(1);
+static vector<string> list_npy_images(const string& dir){
+    vector<string> files;
+    for (auto& p : fs::directory_iterator(dir)){
+        if (!p.is_regular_file()) continue;
+        auto path = p.path().string();
+        if (p.path().extension()==".npy") files.push_back(path);
     }
-   if (arr.word_size != sizeof(float)) {
-        fprintf(stderr, "Errore: tipo pesi non supportato (atteso float32)\n");
-        exit(1);
-    }
-
-    float* weights = (float*)malloc(P * sizeof(float));
-    if (!weights) {
-        fprintf(stderr, "Errore malloc pesi\n");
-        exit(1);
-    }
-    
-    const float* p = arr.data<float>();
-
-    // Se (H,W), i dati sono già contigui per riga: appiattisco
-    for (int i = 0; i < P; ++i) weights[i] = p[i];    
-    
-    return weights;
+    sort(files.begin(), files.end()); // ordinamento deterministico
+    return files;
 }
 
-static float* load_images(const char* filename, int* N) {
-    cnpy::NpyArray arr = cnpy::npy_load(filename);
-    
-    // Accetto (N, P) oppure (N, H, W) oppure (N, 1, H, W)
-    bool ok = false;
-    if (arr.shape.size() == 2 && arr.shape[1] == (size_t)P) ok = true;
-    if (arr.shape.size() == 3 && arr.shape[1] == (size_t)H && arr.shape[2] == (size_t)W) ok = true;
-    if (arr.shape.size() == 4 && arr.shape[1] == 1 && arr.shape[2] == (size_t)H && arr.shape[3] == (size_t)W) ok = true;
 
-    if (!ok) {
-        fprintf(stderr, "Errore: dimensione immagini non valida (atteso (N,P) o (N,H,W) o (N,1,H,W))\n");
-        exit(1);
+// carica pesi, converti in float32 e normalizza a somma=1
+static vector<float> load_and_normalize_weights(const string& path){
+    cnpy::NpyArray arr = cnpy::npy_load(path);
+    if (arr.word_size != sizeof(float)){
+        fprintf(stderr,"Pesi: atteso float32\n"); exit(1);
     }
-    if (arr.word_size != sizeof(float)) {
-        fprintf(stderr, "Errore: tipo immagini non supportato (atteso float32)\n");
-        exit(1);
+    const size_t n = arr.num_vals;
+    if (n != (size_t)P){
+        fprintf(stderr,"Pesi: size %zu != P=%d\n", n, P); exit(1);
     }
+    vector<float> w(P);
+    memcpy(w.data(), arr.data<float>(), P*sizeof(float));
+    double s = 0.0;
+    for (auto v : w) s += v;
+    if (abs(s) < 1e-12) { fprintf(stderr,"Pesi: somma zero\n"); exit(1); }
+    const float invs = 1.0f / (float)s;
+    for (auto& v : w) v *= invs;
+    return w;
+}
 
-    int n_imgs = (int)arr.shape[0];
-    *N = n_imgs;
 
-    float* images = (float*)malloc((size_t)n_imgs * P * sizeof(float));
-    if (!images) {
-        fprintf(stderr, "Errore malloc immagini\n");
-        exit(1);
-    }
-   const float* src = arr.data<float>();
-
-    if (arr.shape.size() == 2) {
-        // (N,P) già appiattito
-        memcpy(images, src, (size_t)n_imgs * P * sizeof(float));
-    } else if (arr.shape.size() == 3) {
-        // (N,H,W) -> (N,P)
-        for (int n = 0; n < n_imgs; ++n) {
-            memcpy(images + (size_t)n * P, src + (size_t)n * P, (size_t)P * sizeof(float));
+// carica singola immagine .npy (uint8 o float32), appiattita e normalizzata in [0,1]
+static void load_image_flatten_01(const string& path, float* out /*size P*/){
+    cnpy::NpyArray arr = cnpy::npy_load(path);
+    if (arr.num_vals != (size_t)P){
+        size_t expect1 = (size_t)H*(size_t)W;
+        if (arr.num_vals != expect1){
+            fprintf(stderr,"Immagine %s: size %zu non compatibile con 224x224\n",
+                    path.c_str(), arr.num_vals);
+            exit(1);
         }
+    }
+    if (arr.word_size == sizeof(unsigned char)){
+        const unsigned char* p = arr.data<unsigned char>();
+        for (int i=0;i<P;++i) out[i] = (float)p[i] / 255.0f;
+    } else if (arr.word_size == sizeof(float)) {
+        const float* p = arr.data<float>();
+        memcpy(out, p, P*sizeof(float));
     } else {
-        // (N,1,H,W) -> (N,P)
-        for (int n = 0; n < n_imgs; ++n) {
-            const float* in = src + (size_t)n * (size_t)(1 * P);
-            memcpy(images + (size_t)n * P, in, (size_t)P * sizeof(float));
-        }
+        fprintf(stderr,"Immagine %s: dtype non supportato\n", path.c_str());
+        exit(1);
     }
-
-    return images;
 }
 
-static void save_scores(const char* filename, float *scores, int N) {
-    vector<size_t> shape = { (size_t)N };
-    cnpy::npy_save(filename, scores, shape, "w");
+// labels: atteso (N, 14) o (N,), estrai colonna cardiomegalia (=1) in {0,1}
+static vector<int> load_labels_binary(const string& path, int N){
+    cnpy::NpyArray arr = cnpy::npy_load(path);
+    vector<int> y(N, 0);
+    if (arr.word_size == sizeof(unsigned char)){
+        if (arr.shape.size()==2 && arr.shape[0]==(size_t)N){
+            // (N, C)
+            const unsigned char* p = arr.data<unsigned char>();
+            size_t C = arr.shape[1];
+            if (C==1){
+                for (int i=0;i<N;++i) y[i] = (int)p[i];
+            } else {
+                if (CARDIOMEGALY_ID >= (int)C){
+                    fprintf(stderr,"labels: col cardiomegalia=%d fuori range C=%zu\n",
+                            CARDIOMEGALY_ID, C);
+                    exit(1);
+                }
+                for (int i=0;i<N;++i) y[i] = (int)p[(size_t)i*C + CARDIOMEGALY_ID];
+            }
+        } else if (arr.shape.size()==1 && arr.shape[0]==(size_t)N){
+            const unsigned char* p = arr.data<unsigned char>();
+            for (int i=0;i<N;++i) y[i] = (int)p[i];
+        } else {
+            fprintf(stderr,"labels: shape non supportata\n"); exit(1);
+        }
+    } else if (arr.word_size == sizeof(float)) {
+        const float* p = arr.data<float>();
+        if (arr.shape.size()==2 && arr.shape[0]==(size_t)N){
+            size_t C = arr.shape[1];
+            if (C==1){ for (int i=0;i<N;++i) y[i] = (int)lround(p[i]); }
+            else {
+                if (CARDIOMEGALY_ID >= (int)C){ fprintf(stderr,"labels: col fuori range\n"); exit(1); }
+                for (int i=0;i<N;++i) y[i] = (int)lround(p[(size_t)i*C + CARDIOMEGALY_ID]);
+            }
+        } else if (arr.shape.size()==1 && arr.shape[0]==(size_t)N){
+            for (int i=0;i<N;++i) y[i] = (int)lround(p[i]);
+        } else { fprintf(stderr,"labels: shape non supportata\n"); exit(1); }
+    } else {
+        fprintf(stderr,"labels: dtype non supportato\n"); exit(1);
+    }
+    for (auto& v : y){ v = (v?1:0); }
+    return y;
 }
 
+// METRICHE
+
+struct Metrics { double acc=0, sens=0, spec=0, prec=0; long TP=0,TN=0,FP=0,FN=0; };
+
+static Metrics compute_metrics(const vector<int>& y, const vector<int>& yhat){
+    Metrics m; size_t N=y.size();
+    for (size_t i=0;i<N;++i){
+        int t=y[i], p=yhat[i];
+        if (t==1 && p==1) ++m.TP;
+        else if (t==0 && p==0) ++m.TN;
+        else if (t==0 && p==1) ++m.FP;
+        else if (t==1 && p==0) ++m.FN;
+    }
+    const double eps=1e-12;
+    m.acc  = double(m.TP+m.TN)/max<size_t>(1,N);
+    m.sens = double(m.TP)/max<double>(eps, m.TP+m.FN);
+    m.spec = double(m.TN)/max<double>(eps, m.TN+m.FP);
+    m.prec = double(m.TP)/max<double>(eps, m.TP+m.FP);
+    return m;
+}
+
+
+// Soglia auto (Youden): sweep su score ordinati
+static float auto_threshold_youden(const vector<float>& scores, const vector<int>& y){
+    const size_t N = scores.size();
+    vector<pair<float,int>> v; v.reserve(N);
+    for (size_t i=0;i<N;++i) v.emplace_back(scores[i], y[i]);
+    sort(v.begin(), v.end(), [](auto& a, auto& b){ return a.first < b.first; });
+
+    long Ptot=0, Ntot=0;
+    for (auto& p : v) (p.second? Ptot : Ntot)++;
+    long TP=0, FP=0, FN=Ptot, TN=Ntot;
+
+    double bestJ = -1e9; float bestT = v.empty()? 0.0f : v.front().first;
+    size_t i=0;
+    while (i<N){
+        float t = v[i].first;
+        size_t j=i;
+        while (j<N && v[j].first==t){
+            if (v[j].second==1){ TP++; FN--; } else { FP++; TN--; }
+            ++j;
+        }
+        double sens = double(TP) / (double)max<long>(1, TP+FN);
+        double spec = double(TN) / (double)max<long>(1, TN+FP);
+        double J = sens + spec - 1.0;
+        if (J > bestJ){ bestJ = J; bestT = t; }
+        i = j;
+    }
+    return bestT;
+}
 
 // CLI
 struct Args{
+    string images_dir;
     string weights_path;
-    string images_path;
-    string out_path;
+    string labels_path;
+    string out_csv="results.csv";
+    string out_metrics="metrics.txt";
+    int limit =-1;
+    float threshold =0.0f;
+    bool auto_th= false;
+    bool have_th=false;
     string kernel = "naive"; //naive || reduce
     int block = BLOCK_SIZE;
 };
@@ -171,40 +256,38 @@ struct Args{
 static void print_usage(const char* prog){
     fprintf(stderr,
         "Uso:\n"
-        "   %s <weights.npy> <images.npy> <out.npy> [--kernel naive | reduce ] [--block N]\n"
-        "default: --kernel naive, -- block %d\n",
-        prog, BLOCK_SIZE
-    );
+        "  %s --images-dir <dir> --weights <weights.npy> [--labels <labels.npy>]\n"
+        "     [--limit N] [--out-csv file.csv] [--out-metrics file.txt]\n"
+        "     [--threshold T | --auto-th] [--kernel reduce|naive] [--block B]\n", prog);
 }
 
 static Args parse_args(int argc, char** argv){
     Args a;
-    if (argc < 4){
-        print_usage(argv[0]);
-        exit(1);
-    }
-    a.weights_path = argv[1];
-    a.images_path = argv[2];
-    a.out_path = argv[3];
- 
-    for (int i = 4; i < argc; ++i) {
+    
+    for (int i=1;i<argc;++i){
         string k = argv[i];
-        if (k == "--kernel" && i + 1 < argc) { a.kernel = argv[++i]; }
-        else if (k == "--block" && i + 1 < argc) { a.block = atoi(argv[++i]); }
-        else {
-            fprintf(stderr, "Argomento sconosciuto o incompleto: %s\n", k.c_str());
-            print_usage(argv[0]);
-            exit(1);
-        }
+        auto need = [&](int m){ if (i+m>=argc){ print_usage(argv[0]); exit(1);} };
+        if (k=="--images-dir"){ need(1); a.images_dir = argv[++i]; }
+        else if (k=="--weights"){ need(1); a.weights_path = argv[++i]; }
+        else if (k=="--labels"){ need(1); a.labels_path = argv[++i]; }
+        else if (k=="--limit"){ need(1); a.limit = stoi(argv[++i]); }
+        else if (k=="--out-csv"){ need(1); a.out_csv = argv[++i]; }
+        else if (k=="--out-metrics"){ need(1); a.out_metrics = argv[++i]; }
+        else if (k=="--threshold"){ need(1); a.threshold = stof(argv[++i]); a.have_th = true; }
+        else if (k=="--auto-th"){ a.auto_th = true; }
+        else if (k=="--kernel"){ need(1); a.kernel = argv[++i]; }
+        else if (k=="--block"){ need(1); a.block = stoi(argv[++i]); }
+        else { fprintf(stderr, "Argomento sconosciuto: %s\n", k.c_str()); print_usage(argv[0]); exit(1); }
     }
 
-    if (a.kernel != "naive" && a.kernel != "reduce") {
-        fprintf(stderr, "Valore non valido per --kernel (usa naive|reduce)\n");
-        exit(1);
+    if (a.images_dir.empty() || a.weights_path.empty()){
+        fprintf(stderr, "Richiesti --images-dir e --weights\n"); print_usage(argv[0]); exit(1);
     }
-    if (a.block <= 0 || a.block > 1024) {
-        fprintf(stderr, "Valore non valido per --block (1..1024)\n");
-        exit(1);
+    if (a.kernel!="reduce" && a.kernel!="naive"){
+        fprintf(stderr, "--kernel deve essere reduce|naive\n"); exit(1);
+    }
+    if (a.block<=0 || a.block>1024){
+        fprintf(stderr, "--block fuori range (1..1024)\n"); exit(1);
     }
     return a;
 
@@ -213,63 +296,114 @@ static Args parse_args(int argc, char** argv){
 int main(int argc, char** argv) {
    Args args = parse_args(argc, argv);
 
-   //caricamento dati su host
-   int N = 0;
-   float* weights = load_weights(args.weights_path.c_str());
-   float* images = load_images(args.images_path.c_str(), &N);
 
-   //allocazioni in base a N
+       // 1) Lista immagini
+    vector<string> files = list_npy_images(args.images_dir);
+    if (files.empty()){ fprintf(stderr,"Nessuna .npy in %s\n", args.images_dir.c_str()); return 1; }
+    if (args.limit>0 && (int)files.size()>args.limit) files.resize(args.limit);
+    const int N = (int)files.size();
+    printf("Trovate %d immagini in %s\n", N, args.images_dir.c_str());
 
-    size_t bytes_imgs= (size_t)N * P * sizeof(float);
-    size_t bytes_w    = (size_t)P * sizeof(float);
-    size_t bytes_out  = (size_t)N * sizeof(float);
-    
-    float *d_images = nullptr, *d_weights = nullptr, *d_scores = nullptr;
-    float *scores = (float*)malloc(bytes_out);
-    if(!scores){
-        fprintf(stderr, "Errore malloc scores\n");
-        return 1;
+    // 2) Pesi (normalizzati)
+    vector<float> weights = load_and_normalize_weights(args.weights_path);
+
+    // 3) Carica immagini in (N,P) float32 [0,1]
+    vector<float> h_images((size_t)N * P);
+    for (int i=0;i<N;++i){
+        load_image_flatten_01(files[i], h_images.data() + (size_t)i*P);
     }
 
-    CUDA_CHECK(cudaMalloc((void**)&d_images,  bytes_imgs));
+
+    // 4) Labels
+    vector<int> y;
+    if (!args.labels_path.empty()){
+        y = load_labels_binary(args.labels_path, N);
+    }
+
+// 5) GPU: calcolo scores[N]
+    float *d_images=nullptr, *d_weights=nullptr, *d_scores=nullptr;
+    size_t bytes_img = (size_t)N*P*sizeof(float);
+    size_t bytes_w   = (size_t)P*sizeof(float);
+    size_t bytes_out = (size_t)N*sizeof(float);
+    
+    CUDA_CHECK(cudaMalloc((void**)&d_images, bytes_img));
     CUDA_CHECK(cudaMalloc((void**)&d_weights, bytes_w));
-    CUDA_CHECK(cudaMalloc((void**)&d_scores,  bytes_out));
+    CUDA_CHECK(cudaMalloc((void**)&d_scores, bytes_out));
+    CUDA_CHECK(cudaMemcpy(d_images, h_images.data(), bytes_img, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_weights, weights.data(), bytes_w, cudaMemcpyHostToDevice));
 
-    CUDA_CHECK(cudaMemcpy(d_images,  images,  bytes_imgs, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_weights, weights, bytes_w,   cudaMemcpyHostToDevice));
-
-    // Se  kernel naive azzero l'output
-    CUDA_CHECK(cudaMemset(d_scores, 0, bytes_out));
-
-    const int blockSize = args.block;
-    const dim3 grid(N);
-    const dim3 block(blockSize);
-    const size_t shmem = (size_t)blockSize * sizeof(float);
-
-    if (args.kernel == "naive") {
+    dim3 grid(N), block(args.block);
+    size_t shmem = (size_t)args.block * sizeof(float);
+    if (args.kernel=="naive"){
+        CUDA_CHECK(cudaMemset(d_scores, 0, bytes_out));
         dot_kernel_naive_atomic<<<grid, block>>>(d_images, d_weights, d_scores, P);
-    } else { // reduce
+    } else {
         dot_kernel_reduce_shared<<<grid, block, shmem>>>(d_images, d_weights, d_scores, P);
     }
-   
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    CUDA_CHECK(cudaMemcpy(scores, d_scores, bytes_out, cudaMemcpyDeviceToHost));
-
-    save_scores(args.out_path.c_str(), scores, N);
-
-   
-    //Deallocazione
-
+    vector<float> scores(N);
+    CUDA_CHECK(cudaMemcpy(scores.data(), d_scores, bytes_out, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(d_images));
     CUDA_CHECK(cudaFree(d_weights));
     CUDA_CHECK(cudaFree(d_scores));
-    free(weights);
-    free(images);
-    free(scores);
 
-    printf("OK: kernel=%s, block=%d, N=%d → salvato %s\n",
-           args.kernel.c_str(), blockSize, N, args.out_path.c_str());
+    // 6) Soglia
+    float th = args.threshold;
+    if (!y.empty()){
+        if (args.auto_th || !args.have_th){
+            th = auto_threshold_youden(scores, y);
+            printf("Auto soglia (Youden): %.6f\n", th);
+        } else {
+            printf("Soglia fissa: %.6f\n", th);
+        }
+    }
+
+    // 7) Predizioni + metriche
+    vector<int> pred(N, 0);
+    for (int i=0;i<N;++i) pred[i] = (scores[i] >= th) ? 1 : 0;
+
+    Metrics m;
+    if (!y.empty()) m = compute_metrics(y, pred);
+
+    // 8) Output CSV per-immagine
+    {
+        ofstream csv(args.out_csv);
+        csv << "filename,score,pred,actual,correct\n";
+        for (int i=0;i<N;++i){
+            int actual = y.empty()? -1 : y[i];
+            int correct = y.empty()? -1 : (pred[i]==actual ? 1 : 0);
+            csv << fs::path(files[i]).filename().string() << ","
+                << setprecision(8) << scores[i] << ","
+                << pred[i] << ","
+                << actual << ","
+                << correct << "\n";
+        }
+        printf("Salvato CSV: %s\n", args.out_csv.c_str());
+    }
+
+    // 9) Output metriche aggregate
+    if (!y.empty()){
+        ofstream txt(args.out_metrics);
+        txt << fixed << setprecision(6);
+        txt << "threshold: " << th << "\n\n";
+        txt << "confusion_matrix:\n";
+        txt << "TN="<<m.TN<<"  FP="<<m.FP<<"\n";
+        txt << "FN="<<m.FN<<"  TP="<<m.TP<<"\n\n";
+        txt << "accuracy="<<m.acc<<"\n";
+        txt << "sensitivity="<<m.sens<<"\n";
+        txt << "specificity="<<m.spec<<"\n";
+        txt << "precision="<<m.prec<<"\n";
+        printf("Salvato metriche: %s\n", args.out_metrics.c_str());
+    }
+
+    // 10) Stampa riassunto
+    printf("Kernel=%s  Block=%d  N=%d  P=%d\n",
+           args.kernel.c_str(), args.block, N, P);
+    if (!y.empty()){
+        printf("Acc=%.4f  Sens=%.4f  Spec=%.4f  Prec=%.4f  (th=%.6f)\n",
+               m.acc, m.sens, m.spec, m.prec, th);
+    }
     return 0;
 }
