@@ -61,6 +61,8 @@ venv/
 .venv/
 env/
 .env/
+cardio_env/
+
 
 .ipynb_checkpoints
 
