@@ -9,7 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <iomanip>
-#include <filesystem>   // C++17
+#include <filesystem>  
 #include <cuda_runtime.h>
 #include "cnpy.h"
 
@@ -62,7 +62,8 @@ __global__ void dot_kernel_naive_atomic(const float* __restrict__ images, const 
 __global__ void dot_kernel_reduce_shared(const float * __restrict__ images, const float* __restrict__ weights, float* __restrict__ scores, int pixels_per_img){
    
     extern __shared__ float sdata[];
-    const int img = blockDim.x;
+    //ogni blocco si occupa di un'immagine
+    const int img = blockIdx.x;
     const int tid = threadIdx.x;
 
     const float* img_ptr = images + (size_t)img * pixels_per_img;
@@ -143,47 +144,63 @@ static void load_image_flatten_01(const string& path, float* out /*size P*/){
     }
 }
 
-// labels: atteso (N, 14) o (N,), estrai colonna cardiomegalia (=1) in {0,1}
+// labels: atteso (M, 14) o (M,), usa solo i primi N items (M >= N). Ritorna y.size()==N.
 static vector<int> load_labels_binary(const string& path, int N){
     cnpy::NpyArray arr = cnpy::npy_load(path);
     vector<int> y(N, 0);
-    if (arr.word_size == sizeof(unsigned char)){
-        if (arr.shape.size()==2 && arr.shape[0]==(size_t)N){
-            // (N, C)
-            const unsigned char* p = arr.data<unsigned char>();
-            size_t C = arr.shape[1];
-            if (C==1){
-                for (int i=0;i<N;++i) y[i] = (int)p[i];
-            } else {
-                if (CARDIOMEGALY_ID >= (int)C){
-                    fprintf(stderr,"labels: col cardiomegalia=%d fuori range C=%zu\n",
-                            CARDIOMEGALY_ID, C);
-                    exit(1);
-                }
-                for (int i=0;i<N;++i) y[i] = (int)p[(size_t)i*C + CARDIOMEGALY_ID];
-            }
-        } else if (arr.shape.size()==1 && arr.shape[0]==(size_t)N){
+
+    // Caso 1: shape (M,)
+    if (arr.shape.size() == 1) {
+        size_t M = arr.shape[0];
+        if (M < (size_t)N) {
+            fprintf(stderr,"labels: M=%zu < N=%d (mancano label)\n", M, N);
+            exit(1);
+        }
+        if (arr.word_size == sizeof(unsigned char)) {
             const unsigned char* p = arr.data<unsigned char>();
             for (int i=0;i<N;++i) y[i] = (int)p[i];
-        } else {
-            fprintf(stderr,"labels: shape non supportata\n"); exit(1);
-        }
-    } else if (arr.word_size == sizeof(float)) {
-        const float* p = arr.data<float>();
-        if (arr.shape.size()==2 && arr.shape[0]==(size_t)N){
-            size_t C = arr.shape[1];
-            if (C==1){ for (int i=0;i<N;++i) y[i] = (int)lround(p[i]); }
-            else {
-                if (CARDIOMEGALY_ID >= (int)C){ fprintf(stderr,"labels: col fuori range\n"); exit(1); }
-                for (int i=0;i<N;++i) y[i] = (int)lround(p[(size_t)i*C + CARDIOMEGALY_ID]);
-            }
-        } else if (arr.shape.size()==1 && arr.shape[0]==(size_t)N){
+        } else if (arr.word_size == sizeof(float)) {
+            const float* p = arr.data<float>();
             for (int i=0;i<N;++i) y[i] = (int)lround(p[i]);
-        } else { fprintf(stderr,"labels: shape non supportata\n"); exit(1); }
-    } else {
-        fprintf(stderr,"labels: dtype non supportato\n"); exit(1);
+        } else {
+            fprintf(stderr,"labels: dtype non supportato\n"); exit(1);
+        }
     }
-    for (auto& v : y){ v = (v?1:0); }
+    // Caso 2: shape (M, C)
+    else if (arr.shape.size() == 2) {
+        size_t M = arr.shape[0];
+        size_t C = arr.shape[1];
+        if (M < (size_t)N) {
+            fprintf(stderr,"labels: M=%zu < N=%d (mancano label)\n", M, N);
+            exit(1);
+        }
+        size_t col = 0;
+        if (C == 1) col = 0;
+        else {
+            if (CARDIOMEGALY_ID >= (int)C) {
+                fprintf(stderr,"labels: col cardiomegalia=%d fuori range C=%zu\n",
+                        CARDIOMEGALY_ID, C);
+                exit(1);
+            }
+            col = (size_t)CARDIOMEGALY_ID;
+        }
+
+        if (arr.word_size == sizeof(unsigned char)) {
+            const unsigned char* p = arr.data<unsigned char>();
+            for (int i=0;i<N;++i) y[i] = (int)p[(size_t)i*C + col];
+        } else if (arr.word_size == sizeof(float)) {
+            const float* p = arr.data<float>();
+            for (int i=0;i<N;++i) y[i] = (int)lround(p[(size_t)i*C + col]);
+        } else {
+            fprintf(stderr,"labels: dtype non supportato\n"); exit(1);
+        }
+    }
+    else {
+        fprintf(stderr,"labels: shape non supportata (ndim=%zu)\n", arr.shape.size());
+        exit(1);
+    }
+
+    for (auto& v : y) v = (v ? 1 : 0);
     return y;
 }
 
@@ -211,32 +228,37 @@ static Metrics compute_metrics(const vector<int>& y, const vector<int>& yhat){
 
 // Soglia auto (Youden): sweep su score ordinati
 static float auto_threshold_youden(const vector<float>& scores, const vector<int>& y){
-    const size_t N = scores.size();
-    vector<pair<float,int>> v; v.reserve(N);
-    for (size_t i=0;i<N;++i) v.emplace_back(scores[i], y[i]);
-    sort(v.begin(), v.end(), [](auto& a, auto& b){ return a.first < b.first; });
+    // Soglie candidate = valori unici degli score
+    vector<float> thr = scores;
+    sort(thr.begin(), thr.end());
+    thr.erase(unique(thr.begin(), thr.end()), thr.end());
+    if (thr.empty()) return 0.5f;
 
-    long Ptot=0, Ntot=0;
-    for (auto& p : v) (p.second? Ptot : Ntot)++;
-    long TP=0, FP=0, FN=Ptot, TN=Ntot;
-
-    double bestJ = -1e9; float bestT = v.empty()? 0.0f : v.front().first;
-    size_t i=0;
-    while (i<N){
-        float t = v[i].first;
-        size_t j=i;
-        while (j<N && v[j].first==t){
-            if (v[j].second==1){ TP++; FN--; } else { FP++; TN--; }
-            ++j;
+    auto youden_at = [&](float t){
+        long TP=0,TN=0,FP=0,FN=0;
+        const size_t N = scores.size();
+        for (size_t i=0;i<N;++i){
+            int p = (scores[i] > t) ? 1 : 0;  // <-- stessa regola usata poi
+            int a = y[i];
+            if (p==1 && a==1) ++TP;
+            else if (p==1 && a==0) ++FP;
+            else if (p==0 && a==1) ++FN;
+            else ++TN;
         }
-        double sens = double(TP) / (double)max<long>(1, TP+FN);
-        double spec = double(TN) / (double)max<long>(1, TN+FP);
-        double J = sens + spec - 1.0;
-        if (J > bestJ){ bestJ = J; bestT = t; }
-        i = j;
+        double sens = (TP+FN) ? double(TP)/double(TP+FN) : 0.0;
+        double spec = (TN+FP) ? double(TN)/double(TN+FP) : 0.0;
+        return sens + spec - 1.0; // Youden's J
+    };
+
+    float best_t = thr.front();
+    double best_J = -1e9;
+    for (float t : thr){
+        double J = youden_at(t);
+        if (J > best_J){ best_J = J; best_t = t; }
     }
-    return bestT;
+    return best_t;
 }
+
 
 // CLI
 struct Args{
@@ -249,7 +271,7 @@ struct Args{
     float threshold =0.0f;
     bool auto_th= false;
     bool have_th=false;
-    string kernel = "naive"; //naive || reduce
+    string kernel = "reduce"; //naive || reduce
     int block = BLOCK_SIZE;
 };
 
@@ -297,7 +319,7 @@ int main(int argc, char** argv) {
    Args args = parse_args(argc, argv);
 
 
-       // 1) Lista immagini
+     // 1) Lista immagini
     vector<string> files = list_npy_images(args.images_dir);
     if (files.empty()){ fprintf(stderr,"Nessuna .npy in %s\n", args.images_dir.c_str()); return 1; }
     if (args.limit>0 && (int)files.size()>args.limit) files.resize(args.limit);
@@ -326,6 +348,11 @@ int main(int argc, char** argv) {
     size_t bytes_w   = (size_t)P*sizeof(float);
     size_t bytes_out = (size_t)N*sizeof(float);
     
+    cudaEvent_t ev_start, ev_stop;
+    cudaEventCreate(&ev_start);
+    cudaEventCreate(&ev_stop);
+
+
     CUDA_CHECK(cudaMalloc((void**)&d_images, bytes_img));
     CUDA_CHECK(cudaMalloc((void**)&d_weights, bytes_w));
     CUDA_CHECK(cudaMalloc((void**)&d_scores, bytes_out));
@@ -334,12 +361,25 @@ int main(int argc, char** argv) {
 
     dim3 grid(N), block(args.block);
     size_t shmem = (size_t)args.block * sizeof(float);
+    cudaEventRecord(ev_start);
     if (args.kernel=="naive"){
         CUDA_CHECK(cudaMemset(d_scores, 0, bytes_out));
         dot_kernel_naive_atomic<<<grid, block>>>(d_images, d_weights, d_scores, P);
     } else {
         dot_kernel_reduce_shared<<<grid, block, shmem>>>(d_images, d_weights, d_scores, P);
     }
+    cudaEventRecord(ev_stop);
+    cudaEventSynchronize(ev_stop);
+
+
+    float gpu_ms = 0.0f;
+    cudaEventElapsedTime(&gpu_ms, ev_start, ev_stop);
+    printf("[GPU] kernel time: %.3f ms\n", gpu_ms);
+
+    cudaEventDestroy(ev_start);
+    cudaEventDestroy(ev_stop);
+
+
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -362,7 +402,7 @@ int main(int argc, char** argv) {
 
     // 7) Predizioni + metriche
     vector<int> pred(N, 0);
-    for (int i=0;i<N;++i) pred[i] = (scores[i] >= th) ? 1 : 0;
+    for (int i=0;i<N;++i) pred[i] = (scores[i] > th) ? 1 : 0;
 
     Metrics m;
     if (!y.empty()) m = compute_metrics(y, pred);

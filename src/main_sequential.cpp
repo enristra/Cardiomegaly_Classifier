@@ -217,9 +217,10 @@ public:
 // stampa risultati (identico al tuo)
 void printResults(const vector<ClassificationResult>& results, const Metrics& metrics) {
     cout << "\n=== RISULTATI CLASSIFICAZIONE ===" << endl;
-    cout << fixed << setprecision(3);
+    cout << fixed << setprecision(4);
     
     cout << "\nMETRICHE:" << endl;
+    cout << "Threshold: " << threshold << endl;
     cout << "Accuracy:    " << metrics.accuracy() * 100 << "%" << endl;
     cout << "Sensitivity: " << metrics.sensitivity() * 100 << "%" << endl;
     cout << "Specificity: " << metrics.specificity() * 100 << "%" << endl;

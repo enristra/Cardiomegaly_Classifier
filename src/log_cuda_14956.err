@@ -1,3 +1,0 @@
-nvcc fatal   : Unknown option '-strd=c++17'
-Errore: npy_load: Unable to open file /scratch.hpc/enrico.strangio/Cardiomegaly_Classifier/data/images/test_image.npy
-srun: error: ws1gpu2-ng.cs.unibo.it: task 0: Exited with exit code 1
