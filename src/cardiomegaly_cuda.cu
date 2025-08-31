@@ -86,6 +86,47 @@ __global__ void dot_kernel_reduce_shared(const float * __restrict__ images, cons
 
 }
 
+// Versione ottimizzata con caricamenti float4 + riduzione in shared
+// Somma pesata con load vettoriali, senza reinterpret_cast nel kernel
+// Somma pesata con load vettoriali, senza reinterpret_cast nel kernel
+__global__ void dot_kernel_reduce_vec4(const float4* __restrict__ images4,
+                                             const float4* __restrict__ weights4,
+                                             float* __restrict__ scores,
+                                             int pixels4_per_img)   // = P/4
+{
+    extern __shared__ float sdata[];
+    const int img = blockIdx.x;
+    const int tid = threadIdx.x;
+
+    const float4* img4 = images4 + (size_t)img * pixels4_per_img;
+
+    // ILP semplice: 4 accumulatori
+    float acc0=0.f, acc1=0.f, acc2=0.f, acc3=0.f;
+
+    #pragma unroll 4
+    for (int i4 = tid; i4 < pixels4_per_img; i4 += blockDim.x) {
+        float4 a = img4[i4];
+        float4 b = weights4[i4];
+        acc0 = fmaf(a.x, b.x, acc0);
+        acc1 = fmaf(a.y, b.y, acc1);
+        acc2 = fmaf(a.z, b.z, acc2);
+        acc3 = fmaf(a.w, b.w, acc3);
+    }
+
+    float acc = (acc0 + acc1) + (acc2 + acc3);
+
+    sdata[tid] = acc;
+    __syncthreads();
+
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) scores[img] = sdata[0];
+}
+
+
+
 // I/O (cnpy)
 
 static vector<string> list_npy_images(const string& dir){
@@ -280,7 +321,7 @@ static void print_usage(const char* prog){
         "Uso:\n"
         "  %s --images-dir <dir> --weights <weights.npy> [--labels <labels.npy>]\n"
         "     [--limit N] [--out-csv file.csv] [--out-metrics file.txt]\n"
-        "     [--threshold T | --auto-th] [--kernel reduce|naive] [--block B]\n", prog);
+        "     [--threshold T | --auto-th] [--kernel reduce|naive|vec4] [--block B]\n", prog);
 }
 
 static Args parse_args(int argc, char** argv){
@@ -305,8 +346,8 @@ static Args parse_args(int argc, char** argv){
     if (a.images_dir.empty() || a.weights_path.empty()){
         fprintf(stderr, "Richiesti --images-dir e --weights\n"); print_usage(argv[0]); exit(1);
     }
-    if (a.kernel!="reduce" && a.kernel!="naive"){
-        fprintf(stderr, "--kernel deve essere reduce|naive\n"); exit(1);
+    if (a.kernel!="reduce" && a.kernel!="naive" && a.kernel!="vec4"){
+        fprintf(stderr, "--kernel deve essere reduce|naive|vec4\n"); exit(1);
     }
     if (a.block<=0 || a.block>1024){
         fprintf(stderr, "--block fuori range (1..1024)\n"); exit(1);
@@ -316,83 +357,158 @@ static Args parse_args(int argc, char** argv){
 }
 
 int main(int argc, char** argv) {
-   Args args = parse_args(argc, argv);
+    // --- parsing CLI ---
+    Args args = parse_args(argc, argv);
 
+    // --- costanti utili ---
+    if (P % 4 != 0) {
+        fprintf(stderr, "Errore: P=%d non è multiplo di 4 (richiesto per kernel vec4)\n", P);
+        return 1;
+    }
+    const int P4 = P / 4;
 
-     // 1) Lista immagini
+    // --- 1) Lista immagini ---
     vector<string> files = list_npy_images(args.images_dir);
-    if (files.empty()){ fprintf(stderr,"Nessuna .npy in %s\n", args.images_dir.c_str()); return 1; }
-    if (args.limit>0 && (int)files.size()>args.limit) files.resize(args.limit);
+    if (files.empty()) {
+        fprintf(stderr, "Nessuna .npy in %s\n", args.images_dir.c_str());
+        return 1;
+    }
+    if (args.limit > 0 && (int)files.size() > args.limit) files.resize(args.limit);
     const int N = (int)files.size();
     printf("Trovate %d immagini in %s\n", N, args.images_dir.c_str());
 
-    // 2) Pesi (normalizzati)
+    // --- 2) Pesi (normalizzati) ---
     vector<float> weights = load_and_normalize_weights(args.weights_path);
 
-    // 3) Carica immagini in (N,P) float32 [0,1]
+    // --- 3) Carica immagini host in (N, P) float32 [0,1] ---
     vector<float> h_images((size_t)N * P);
-    for (int i=0;i<N;++i){
-        load_image_flatten_01(files[i], h_images.data() + (size_t)i*P);
+    for (int i = 0; i < N; ++i) {
+        load_image_flatten_01(files[i], h_images.data() + (size_t)i * P);
     }
 
-
-    // 4) Labels
+    // --- 4) Labels (opzionale) ---
     vector<int> y;
-    if (!args.labels_path.empty()){
+    if (!args.labels_path.empty()) {
         y = load_labels_binary(args.labels_path, N);
     }
 
-// 5) GPU: calcolo scores[N]
-    float *d_images=nullptr, *d_weights=nullptr, *d_scores=nullptr;
-    size_t bytes_img = (size_t)N*P*sizeof(float);
-    size_t bytes_w   = (size_t)P*sizeof(float);
-    size_t bytes_out = (size_t)N*sizeof(float);
-    
+    // --- 5) GPU: calcolo scores[N] ---
+    const size_t bytes_img_all = (size_t)N * P * sizeof(float);
+    const size_t bytes_w       = (size_t)P * sizeof(float);
+    const size_t bytes_out     = (size_t)N * sizeof(float);
+
     cudaEvent_t ev_start, ev_stop;
-    cudaEventCreate(&ev_start);
-    cudaEventCreate(&ev_stop);
+    CUDA_CHECK(cudaEventCreate(&ev_start));
+    CUDA_CHECK(cudaEventCreate(&ev_stop));
 
-
-    CUDA_CHECK(cudaMalloc((void**)&d_images, bytes_img));
-    CUDA_CHECK(cudaMalloc((void**)&d_weights, bytes_w));
-    CUDA_CHECK(cudaMalloc((void**)&d_scores, bytes_out));
-    CUDA_CHECK(cudaMemcpy(d_images, h_images.data(), bytes_img, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_weights, weights.data(), bytes_w, cudaMemcpyHostToDevice));
+    vector<float> scores(N, 0.f);
 
     dim3 grid(N), block(args.block);
     size_t shmem = (size_t)args.block * sizeof(float);
-    cudaEventRecord(ev_start);
-    if (args.kernel=="naive"){
-        CUDA_CHECK(cudaMemset(d_scores, 0, bytes_out));
-        dot_kernel_naive_atomic<<<grid, block>>>(d_images, d_weights, d_scores, P);
-    } else {
-        dot_kernel_reduce_shared<<<grid, block, shmem>>>(d_images, d_weights, d_scores, P);
-    }
-    cudaEventRecord(ev_stop);
-    cudaEventSynchronize(ev_stop);
-
 
     float gpu_ms = 0.0f;
-    cudaEventElapsedTime(&gpu_ms, ev_start, ev_stop);
-    printf("[GPU] kernel time: %.3f ms\n", gpu_ms);
 
-    cudaEventDestroy(ev_start);
-    cudaEventDestroy(ev_stop);
+    if (args.kernel == "naive") {
+        // --- naive: float* ---
+        float *d_images = nullptr, *d_weights = nullptr, *d_scores = nullptr;
+        CUDA_CHECK(cudaMalloc((void**)&d_images, bytes_img_all));
+        CUDA_CHECK(cudaMalloc((void**)&d_weights, bytes_w));
+        CUDA_CHECK(cudaMalloc((void**)&d_scores, bytes_out));
 
+        CUDA_CHECK(cudaMemcpy(d_images,  h_images.data(), bytes_img_all, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_weights, weights.data(),  bytes_w,       cudaMemcpyHostToDevice));
 
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemset(d_scores, 0, bytes_out));
 
-    vector<float> scores(N);
-    CUDA_CHECK(cudaMemcpy(scores.data(), d_scores, bytes_out, cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaFree(d_images));
-    CUDA_CHECK(cudaFree(d_weights));
-    CUDA_CHECK(cudaFree(d_scores));
+        CUDA_CHECK(cudaEventRecord(ev_start));
+        dot_kernel_naive_atomic<<<grid, block>>>(d_images, d_weights, d_scores, P);
+        CUDA_CHECK(cudaEventRecord(ev_stop));
+        CUDA_CHECK(cudaEventSynchronize(ev_stop));
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
 
-    // 6) Soglia
+        CUDA_CHECK(cudaEventElapsedTime(&gpu_ms, ev_start, ev_stop));
+        printf("[GPU] kernel time: %.3f ms\n", gpu_ms);
+
+        CUDA_CHECK(cudaMemcpy(scores.data(), d_scores, bytes_out, cudaMemcpyDeviceToHost));
+
+        CUDA_CHECK(cudaFree(d_images));
+        CUDA_CHECK(cudaFree(d_weights));
+        CUDA_CHECK(cudaFree(d_scores));
+    }
+    else if (args.kernel == "reduce") {
+        // --- reduce (shared): float* ---
+        float *d_images = nullptr, *d_weights = nullptr, *d_scores = nullptr;
+        CUDA_CHECK(cudaMalloc((void**)&d_images, bytes_img_all));
+        CUDA_CHECK(cudaMalloc((void**)&d_weights, bytes_w));
+        CUDA_CHECK(cudaMalloc((void**)&d_scores, bytes_out));
+
+        CUDA_CHECK(cudaMemcpy(d_images,  h_images.data(), bytes_img_all, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_weights, weights.data(),  bytes_w,       cudaMemcpyHostToDevice));
+
+        // (facoltativo) preferisci L1 anche qui se usi poca shared per blocco
+        CUDA_CHECK(cudaFuncSetCacheConfig(dot_kernel_reduce_shared, cudaFuncCachePreferL1));
+
+        CUDA_CHECK(cudaEventRecord(ev_start));
+        dot_kernel_reduce_shared<<<grid, block, shmem>>>(d_images, d_weights, d_scores, P);
+        CUDA_CHECK(cudaEventRecord(ev_stop));
+        CUDA_CHECK(cudaEventSynchronize(ev_stop));
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        CUDA_CHECK(cudaEventElapsedTime(&gpu_ms, ev_start, ev_stop));
+        printf("[GPU] kernel time: %.3f ms\n", gpu_ms);
+
+        CUDA_CHECK(cudaMemcpy(scores.data(), d_scores, bytes_out, cudaMemcpyDeviceToHost));
+
+        CUDA_CHECK(cudaFree(d_images));
+        CUDA_CHECK(cudaFree(d_weights));
+        CUDA_CHECK(cudaFree(d_scores));
+    }
+    else if (args.kernel == "vec4") {
+        // --- vec4: tipizza direttamente come float4* ---
+        float4 *d_images4 = nullptr, *d_weights4 = nullptr;
+        float  *d_scores  = nullptr;
+
+        // Nota: i byte copiati sono identici, cambia solo il tipo puntatore sul device
+        CUDA_CHECK(cudaMalloc((void**)&d_images4, (size_t)N * P4 * sizeof(float4)));
+        CUDA_CHECK(cudaMalloc((void**)&d_weights4,         P4 * sizeof(float4)));
+        CUDA_CHECK(cudaMalloc((void**)&d_scores,  bytes_out));
+
+        CUDA_CHECK(cudaMemcpy(d_images4,  h_images.data(), bytes_img_all, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_weights4, weights.data(),  bytes_w,       cudaMemcpyHostToDevice));
+
+        // Più L1 cache (usi pochissima shared dinamica)
+        CUDA_CHECK(cudaFuncSetCacheConfig(dot_kernel_reduce_vec4, cudaFuncCachePreferL1));
+
+        CUDA_CHECK(cudaEventRecord(ev_start));
+        dot_kernel_reduce_vec4<<<grid, block, shmem>>>(d_images4, d_weights4, d_scores, P4);
+        CUDA_CHECK(cudaEventRecord(ev_stop));
+        CUDA_CHECK(cudaEventSynchronize(ev_stop));
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        CUDA_CHECK(cudaEventElapsedTime(&gpu_ms, ev_start, ev_stop));
+        printf("[GPU] kernel time: %.3f ms\n", gpu_ms);
+
+        CUDA_CHECK(cudaMemcpy(scores.data(), d_scores, bytes_out, cudaMemcpyDeviceToHost));
+
+        CUDA_CHECK(cudaFree(d_images4));
+        CUDA_CHECK(cudaFree(d_weights4));
+        CUDA_CHECK(cudaFree(d_scores));
+    }
+    else {
+        fprintf(stderr, "Kernel sconosciuto: %s\n", args.kernel.c_str());
+        return 1;
+    }
+
+    CUDA_CHECK(cudaEventDestroy(ev_start));
+    CUDA_CHECK(cudaEventDestroy(ev_stop));
+
+    // --- 6) Soglia ---
     float th = args.threshold;
-    if (!y.empty()){
-        if (args.auto_th || !args.have_th){
+    if (!y.empty()) {
+        if (args.auto_th || !args.have_th) {
             th = auto_threshold_youden(scores, y);
             printf("Auto soglia (Youden): %.6f\n", th);
         } else {
@@ -400,20 +516,20 @@ int main(int argc, char** argv) {
         }
     }
 
-    // 7) Predizioni + metriche
+    // --- 7) Predizioni + metriche ---
     vector<int> pred(N, 0);
-    for (int i=0;i<N;++i) pred[i] = (scores[i] > th) ? 1 : 0;
+    for (int i = 0; i < N; ++i) pred[i] = (scores[i] > th) ? 1 : 0;
 
     Metrics m;
     if (!y.empty()) m = compute_metrics(y, pred);
 
-    // 8) Output CSV per-immagine
+    // --- 8) Output CSV per-immagine ---
     {
         ofstream csv(args.out_csv);
         csv << "filename,score,pred,actual,correct\n";
-        for (int i=0;i<N;++i){
-            int actual = y.empty()? -1 : y[i];
-            int correct = y.empty()? -1 : (pred[i]==actual ? 1 : 0);
+        for (int i = 0; i < N; ++i) {
+            int actual  = y.empty() ? -1 : y[i];
+            int correct = y.empty() ? -1 : (pred[i] == actual ? 1 : 0);
             csv << fs::path(files[i]).filename().string() << ","
                 << setprecision(8) << scores[i] << ","
                 << pred[i] << ","
@@ -423,25 +539,25 @@ int main(int argc, char** argv) {
         printf("Salvato CSV: %s\n", args.out_csv.c_str());
     }
 
-    // 9) Output metriche aggregate
-    if (!y.empty()){
+    // --- 9) Output metriche aggregate ---
+    if (!y.empty()) {
         ofstream txt(args.out_metrics);
         txt << fixed << setprecision(6);
         txt << "threshold: " << th << "\n\n";
         txt << "confusion_matrix:\n";
-        txt << "TN="<<m.TN<<"  FP="<<m.FP<<"\n";
-        txt << "FN="<<m.FN<<"  TP="<<m.TP<<"\n\n";
-        txt << "accuracy="<<m.acc<<"\n";
-        txt << "sensitivity="<<m.sens<<"\n";
-        txt << "specificity="<<m.spec<<"\n";
-        txt << "precision="<<m.prec<<"\n";
+        txt << "TN=" << m.TN << "  FP=" << m.FP << "\n";
+        txt << "FN=" << m.FN << "  TP=" << m.TP << "\n\n";
+        txt << "accuracy="    << m.acc  << "\n";
+        txt << "sensitivity=" << m.sens << "\n";
+        txt << "specificity=" << m.spec << "\n";
+        txt << "precision="   << m.prec << "\n";
         printf("Salvato metriche: %s\n", args.out_metrics.c_str());
     }
 
-    // 10) Stampa riassunto
+    // --- 10) Stampa riassunto ---
     printf("Kernel=%s  Block=%d  N=%d  P=%d\n",
            args.kernel.c_str(), args.block, N, P);
-    if (!y.empty()){
+    if (!y.empty()) {
         printf("Acc=%.4f  Sens=%.4f  Spec=%.4f  Prec=%.4f  (th=%.6f)\n",
                m.acc, m.sens, m.spec, m.prec, th);
     }

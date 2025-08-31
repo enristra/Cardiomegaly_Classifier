@@ -22,7 +22,7 @@ srun ./cardiomegaly_cuda \
   --weights ../data/weights/static_weights_224x224.npy \
   --labels ../data/labels.npy \
   --auto-th \
-  --kernel naive \
+  --kernel vec4 \
   --out-csv ../results/gpu_scores.csv \
   --out-metrics ../results/gpu_metrics.txt
 
