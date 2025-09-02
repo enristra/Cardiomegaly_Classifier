@@ -31,6 +31,7 @@
 *.out
 *.app
 sequential_classifier
+cardiomegaly_cuda
 
 *.npy
 
@@ -72,3 +73,9 @@ cardio_env/
 
 *.docx
 *.txt
+
+*.sbatch
+*.err
+*.out
+*.ncu-rep
+*.qdstrm
