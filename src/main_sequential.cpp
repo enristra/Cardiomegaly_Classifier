@@ -92,6 +92,9 @@ public:
         } else {
             cout << "Attenzione: somma pesi = 0, nessuna normalizzazione applicata.\n";
         }
+        float wmin = *min_element(weights.begin(), weights.end());
+float wmax = *max_element(weights.begin(), weights.end());
+cout << "Peso min: " << wmin << ", max: " << wmax << endl;
         
         cout << "Pesi caricati: " << weights.size() << " elementi" << endl;
     }
@@ -120,7 +123,16 @@ public:
         }
         
         cout << "Labels caricate: " << labels.size() << " elementi (solo cardiomegalia)" << endl;
+        // --- DEBUG: conteggio positivi/negativi ---
+    int num_positivi = 0;
+    int num_negativi = 0;
+    for (int l : labels) {
+        if (l > 0) num_positivi++;
+        else num_negativi++;
     }
+    cout << "Numero di campioni positivi: " << num_positivi << endl;
+    cout << "Numero di campioni negativi: " << num_negativi << endl;
+}
     
     float calculateScore(const string& image_file) {
         cnpy::NpyArray arr = cnpy::npy_load(image_file);
@@ -217,10 +229,9 @@ public:
 // stampa risultati (identico al tuo)
 void printResults(const vector<ClassificationResult>& results, const Metrics& metrics) {
     cout << "\n=== RISULTATI CLASSIFICAZIONE ===" << endl;
-    cout << fixed << setprecision(4);
+    cout << fixed << setprecision(3);
     
     cout << "\nMETRICHE:" << endl;
-    cout << "Threshold: " << threshold << endl;
     cout << "Accuracy:    " << metrics.accuracy() * 100 << "%" << endl;
     cout << "Sensitivity: " << metrics.sensitivity() * 100 << "%" << endl;
     cout << "Specificity: " << metrics.specificity() * 100 << "%" << endl;
@@ -305,7 +316,7 @@ static void write_metrics_txt(const  string& path, const Metrics& m, float thr){
 int main(int argc, char** argv) {
     try {
         // Usa i pesi statici generati
-        string weights_file = "../data/weights/static_weights_224x224.npy";
+        string weights_file = "../data/weights/cardio_weights_224x224.npy";
         string labels_file  = "../data/labels.npy";
         string images_dir   = "../data/images";
         
@@ -357,21 +368,40 @@ int main(int argc, char** argv) {
             results = move(all_results);
         }
 
-        //soglia
-        float used_threshold = threshold;
-        if (auto_threshold){
-            used_threshold = findBestThreshold(results);
-            classifier.setThreshold(used_threshold);
-        }
+        // --- DEBUG: statistiche score
+        float min_score = numeric_limits<float>::max();
+        float max_score = numeric_limits<float>::lowest();
+        vector<float> scores;
+        scores.reserve(results.size());
 
         //applicazione soglia scelta
+        for (auto& r : results){
+            scores.push_back(r.score);
+            min_score = min(min_score, r.score);
+            max_score = max(max_score, r.score);
+        }
+
+        sort(scores.begin(), scores.end());
+        float median_score = scores[scores.size()/2];
+
+        cout << "Score min: " << min_score << ", max: " << max_score 
+     << ", median: " << median_score << endl;
+
+        // --- Soglia basata sulla mediana o fissa ---
+        //float used_threshold = 0.5f;        // soglia fissa
+        float used_threshold = median_score; // soglia = mediana
+
+
+        classifier.setThreshold(used_threshold);
+
+        //Applicazione soglia scelta
         for (auto& r : results){
             r.predicted = (r.score > used_threshold);
             r.correct = (r.predicted == r.actual);
         }
 
-
         auto metrics = classifier.calculateMetrics(results);
+
 
         //Stampa a console
         printResults(results, metrics);

@@ -36,6 +36,11 @@ cardiomegaly_cuda
 *.npy
 
 !data/weights/*.npy
+generate_weights.py
+/notebooks
+/logs
+/results
+
 
 build/
 

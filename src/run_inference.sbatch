@@ -19,11 +19,10 @@ nvidia-smi || true
 # Esecuzione vera e propria
 srun ./cardiomegaly_cuda \
   --images-dir ../data/images \
-  --weights ../data/weights/static_weights_224x224.npy \
+  --weights ../data/weights/cardio_weights_224x224.npy \
   --labels ../data/labels.npy \
   --auto-th \
   --kernel vec4 \
-  --out-csv ../results/gpu_scores.csv \
   --out-metrics ../results/gpu_metrics.txt
 
 echo "Job completed."

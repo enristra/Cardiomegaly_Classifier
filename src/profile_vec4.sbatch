@@ -10,13 +10,15 @@
 
 nvidia-smi || true
 
-ncu --set full --target-processes all \
-    ./cardiomegaly_cuda \
-    --images-dir ../data/images \
-    --weights ../data/weights/static_weights_224x224.npy \
-    --labels  ../data/labels.npy \
-    --kernel vec4 --limit 1000 --auto-th \
-    > ../results/vec4_profile.txt
+nsys profile --stats=true ./cardiomegaly_cuda
+
+# ncu --set full --target-processes all \
+#     ./cardiomegaly_cuda \
+#     --images-dir ../data/images \
+#     --weights ../data/weights/static_weights_224x224.npy \
+#     --labels  ../data/labels.npy \
+#     --kernel vec4 --limit 1000 --auto-th \
+#     > ../results/vec4_profile.txt
 
 
 # ncu --set full --target-processes all \
